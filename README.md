@@ -17,7 +17,7 @@ npm run pack
 ## Conectar dois computadores
 
 1. Abra o HeyMouse nos dois computadores, na mesma rede IPv4.
-2. Em um deles, clique em **Parear dispositivo → Gerar código**. No outro, abra **Digitar código** e digite os 12 caracteres. O código vence em cinco minutos e pode ser usado uma vez. Mantenha a descoberta automática ativa nos dois computadores.
+2. Em um deles, clique em **Parear dispositivo → Gerar código**. No outro, abra **Digitar código** e digite os seis n?meros e clique em **Parear**. Confirme no computador que gerou o c?digo. O código vence em cinco minutos e pode ser usado uma vez. Mantenha a descoberta automática ativa nos dois computadores.
 3. No computador que tem o mouse e teclado, selecione o modo servidor. No outro, selecione o modo receptor e escolha o servidor pareado.
 4. No servidor, arraste as telas para refletir a posição física dos computadores. Use **Iniciar** nos dois.
 

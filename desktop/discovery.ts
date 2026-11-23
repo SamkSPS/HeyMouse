@@ -23,14 +23,14 @@ export interface Announcement {
   inputPort: number;
   fingerprint: string;
   engineFingerprint?: string;
-  inviteProof?: string;
+  pairingSession?: string;
   engineAvailable: boolean;
   role: Device['role'];
   publicKey: string;
 }
 
 export interface DiscoveredDevice extends Device {
-  inviteProof?: string;
+  pairingSession?: string;
   publicKey: string;
 }
 
@@ -79,7 +79,7 @@ function parseAnnouncement(value: unknown): Announcement | null {
     typeof a.engineAvailable !== 'boolean' || !['server', 'client'].includes(a.role as string) ||
     typeof a.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(a.fingerprint) ||
     typeof a.publicKey !== 'string' || a.publicKey.length > 512 ||
-    (a.inviteProof !== undefined && (typeof a.inviteProof !== 'string' || !/^[a-f0-9]{64}$/.test(a.inviteProof))) ||
+    (a.pairingSession !== undefined && (typeof a.pairingSession !== 'string' || !/^[a-f0-9]{64}$/.test(a.pairingSession))) ||
     (a.engineFingerprint !== undefined && (typeof a.engineFingerprint !== 'string' || !/^(?:[a-fA-F0-9]{64}|(?:[a-fA-F0-9]{2}:){31}[a-fA-F0-9]{2})$/.test(a.engineFingerprint)))
   ) return null;
   try {
@@ -94,7 +94,7 @@ function parseAnnouncement(value: unknown): Announcement | null {
     platform: a.platform as Announcement['platform'], controlPort: a.controlPort,
     inputPort: a.inputPort, fingerprint: a.fingerprint,
     engineFingerprint: a.engineFingerprint as string | undefined,
-    ...(typeof a.inviteProof === 'string' ? { inviteProof: a.inviteProof } : {}),
+    ...(typeof a.pairingSession === 'string' ? { pairingSession: a.pairingSession } : {}),
     engineAvailable: a.engineAvailable, role: a.role as Announcement['role'], publicKey: a.publicKey,
   };
 }

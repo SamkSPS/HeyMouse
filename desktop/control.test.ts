@@ -5,7 +5,8 @@ import { decodeAnnouncement, encodeAnnouncement, type DiscoveredDevice } from '.
 import { certificateFingerprint, createIdentity, fingerprint, identityId, signPayload, verifyPayload } from './identity';
 import type { TrustedPeer } from './store';
 
-test('a signed LAN announcement enables one-time short-code pairing over pinned TLS', async () => {
+test('six-digit pairing persists trust only after the host confirms', async () => {
+  let respond: ((approved: boolean) => void) | undefined;
   const makeDevice = async (name: string) => {
     const identity = await createIdentity();
     const peers = new Map<string, TrustedPeer>();
@@ -21,6 +22,7 @@ test('a signed LAN announcement enables one-time short-code pairing over pinned 
       getDiscovered: () => discovered,
       getPeer: id => peers.get(id),
       onPair: async peer => { peers.set(peer.device.id, peer); },
+      confirmPair: async () => new Promise<boolean>(resolve => { respond = resolve; }),
     });
     return { control, identity, peers, discovered, getDevice };
   };
@@ -28,25 +30,43 @@ test('a signed LAN announcement enables one-time short-code pairing over pinned 
   const [host, joiner] = await Promise.all([makeDevice('host'), makeDevice('joiner')]);
   try {
     await Promise.all([host.control.start(0, '127.0.0.1'), joiner.control.start(0, '127.0.0.1')]);
-    const invite = host.control.createInvite();
-    assert.match(invite.code, /^[2-9A-HJ-NP-Z]{4}(?:-[2-9A-HJ-NP-Z]{4}){2}$/);
-    const packet = encodeAnnouncement({
-      ...host.getDevice(), publicKey: host.identity.publicKey, inviteProof: host.control.inviteProof(),
-    }, payload => signPayload(payload, host.identity.privateKey));
-    const announcement = decodeAnnouncement(packet, verifyPayload);
-    assert.ok(announcement);
-    const discovered = { ...host.getDevice(), ...announcement.device, paired: false };
-    joiner.discovered.push({ ...discovered, engineFingerprint: '0'.repeat(64) });
-    await assert.rejects(joiner.control.pair(invite.code), /Código não encontrado/);
-    joiner.discovered.splice(0, 1, discovered);
-    const replacement = invite.code[0] === '2' ? '3' : '2';
-    await assert.rejects(joiner.control.pair(replacement + invite.code.slice(1)), /Código não encontrado/);
-    const peer = await joiner.control.pair(invite.code.toLowerCase().replaceAll('-', ' '));
+    const advertise = () => {
+      const invite = host.control.createInvite();
+      assert.match(invite.code, /^\d{6}$/);
+      const packet = encodeAnnouncement({
+        ...host.getDevice(), publicKey: host.identity.publicKey, pairingSession: host.control.pairingSession(),
+      }, payload => signPayload(payload, host.identity.privateKey));
+      const announcement = decodeAnnouncement(packet, verifyPayload);
+      assert.ok(announcement);
+      joiner.discovered.splice(0, 1, { ...host.getDevice(), ...announcement.device, paired: false });
+      return invite.code;
+    };
+    const answer = async (approved: boolean) => {
+      for (let i = 0; i < 100 && !respond; i++) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.ok(respond);
+      assert.equal(host.peers.size, 0);
+      assert.equal(joiner.peers.size, 0);
+      respond(approved);
+      respond = undefined;
+    };
+    const code = advertise();
+    const replacement = code[0] === '0' ? '1' : '0';
+    await assert.rejects(joiner.control.pair(replacement + code.slice(1)), /Código incorreto/);
+    assert.equal(respond, undefined);
+    const rejected = assert.rejects(joiner.control.pair(code), /Pareamento recusado/);
+    await answer(false);
+    await rejected;
+    assert.equal(host.peers.size, 0);
+    assert.equal(joiner.peers.size, 0);
+    const newCode = advertise();
+    const pending = joiner.control.pair(newCode);
+    await answer(true);
+    const peer = await pending;
     assert.equal(peer.device.id, host.getDevice().id);
     assert.equal(host.peers.get(joiner.getDevice().id)?.publicKey, joiner.identity.publicKey);
     assert.equal(joiner.peers.get(host.getDevice().id)?.publicKey, host.identity.publicKey);
-    assert.equal(host.control.inviteProof(), undefined);
-    await assert.rejects(joiner.control.pair(invite.code), /já utilizado/);
+    assert.equal(host.control.pairingSession(), undefined);
+    await assert.rejects(joiner.control.pair(newCode), /já utilizado/);
   } finally {
     await Promise.all([host.control.stop(), joiner.control.stop()]);
   }

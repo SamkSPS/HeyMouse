@@ -62,6 +62,21 @@ async function paired(peer: TrustedPeer) {
   discovered.delete(peer.device.id); addPlacement(peer.device.id);
   await persist(); discovery?.refresh(); scheduleRestart();
 }
+async function confirmPair(device: Device, signal: AbortSignal): Promise<boolean> {
+  if (!window) await createWindow();
+  if (!window || signal.aborted || closing) return false;
+  window.show();
+  window.focus();
+  const result = await dialog.showMessageBox(window, {
+    type: 'question', title: 'Parear dispositivo',
+    message: `Parear com ${device.name}?`,
+    detail: 'Confirme se é o computador em que você acabou de digitar o código.',
+    buttons: ['Recusar', 'Confirmar'], defaultId: 0, cancelId: 0, signal,
+  });
+  if (signal.aborted) return false;
+  discovery.refresh();
+  return result.response === 1;
+}
 function engineOptions() {
   return { settings: store.state.settings.engine, localDeviceId: localId, devices: store.state.peers.map(p => p.device),
     layout: store.state.layout, certificatePem: identity.tlsKey + '\n' + identity.certificate, clipboardSharing: false };
@@ -90,13 +105,13 @@ function onDiscovered(device: DiscoveredDevice) {
       notice(`A identidade de ${peer.device.name} mudou. Refaça o pareamento nesse computador.`); return;
     }
     const changed = peer.device.addresses[0] !== device.addresses[0] || peer.device.inputPort !== device.inputPort || peer.device.controlPort !== device.controlPort;
-    const { publicKey: _key, inviteProof: _proof, ...publicDevice } = device;
+    const { publicKey: _key, pairingSession: _proof, ...publicDevice } = device;
     peer.device = { ...publicDevice, paired: true, engineFingerprint: peer.tlsFingerprint };
     if (changed) {
       void persist().catch(error => notice(error.message));
       if (store.state.settings.engine.role === 'client' && store.state.settings.engine.serverDeviceId === device.id) scheduleRestart();
     }
-  } else { const { publicKey: _key, inviteProof: _proof, ...publicDevice } = device; discovered.set(device.id, publicDevice); }
+  } else { const { publicKey: _key, pairingSession: _proof, ...publicDevice } = device; discovered.set(device.id, publicDevice); }
   publish();
 }
 async function pollPeers() {
@@ -220,10 +235,10 @@ async function boot() {
   store = new Store(app.getPath('userData'), localId); await store.load();
   store.state.settings.engine.screenName = engineScreenName(localId);
   engine = new EngineManager({ dataDir: app.getPath('userData'), resourcesDir: app.isPackaged ? join(process.resourcesPath, 'engine') : join(app.getAppPath(), 'resources/engine'), onStatus: publish, onLog: publish });
-  control = new ControlServer({ identity, getDevice: localDevice, getDiscovered: () => discovery?.devices() ?? [], getPeer: id => store.state.peers.find(p => p.device.id === id), onPair: paired });
+  control = new ControlServer({ identity, getDevice: localDevice, getDiscovered: () => discovery?.devices() ?? [], getPeer: id => store.state.peers.find(p => p.device.id === id), onPair: paired, confirmPair });
   try { await control.start(); } catch (error) { notice(`Pareamento indisponível: ${(error as Error).message}`); }
   engineAvailable = (await engine.detect(store.state.settings.engine.executablePath)).available;
-  discovery = new Discovery({ getAnnouncement: () => ({ ...localDevice(), publicKey: identity.publicKey, inviteProof: control.inviteProof() }), sign: payload => signPayload(payload, identity.privateKey), verify: verifyPayload });
+  discovery = new Discovery({ getAnnouncement: () => ({ ...localDevice(), publicKey: identity.publicKey, pairingSession: control.pairingSession() }), sign: payload => signPayload(payload, identity.privateKey), verify: verifyPayload });
   discovery.on('device', onDiscovered);
   discovery.on('status', status => { discoveryStatus = status; publish(); });
   discovery.on('offline', (id: string) => { const peer = store.state.peers.find(p => p.device.id === id); if (peer && Date.now() - peer.device.lastSeen > 14000) peer.device.online = false; discovered.delete(id); delete latency[id]; publish(); });
