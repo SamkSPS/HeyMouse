@@ -6,11 +6,18 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Device, PairInvite } from '../shared/types';
 import { certificateFingerprint, fingerprint, identityId, signPayload, verifyPayload, type Identity } from './identity';
 import type { DiscoveredDevice } from './discovery';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { rename, unlink } from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
+import { Transform } from 'node:stream';
+import path from 'node:path';
 import type { TrustedPeer } from './store';
 
 interface PublicIdentity { device: Device; publicKey: string; tlsFingerprint: string }
 interface Envelope { payload: string; signature: string }
-interface Payload extends PublicIdentity { timestamp: number; nonce: string; recipient: string; token?: string }
+interface Payload extends PublicIdentity { timestamp: number; nonce: string; recipient: string; token?: string; file?: FileOffer }
+export interface FileOffer { name: string; size: number }
+const MAX_FILE_BYTES = 2 * 1024 ** 3;
 interface PairTarget { id: string; publicKey: string; tlsFingerprint: string; addresses: string[]; port: number; token: string }
 interface ControlOptions {
   identity: Identity;
@@ -19,6 +26,8 @@ interface ControlOptions {
   getPeer: (id: string) => TrustedPeer | undefined;
   onPair: (peer: TrustedPeer) => Promise<void>;
   confirmPair: (device: Device, signal: AbortSignal) => Promise<boolean>;
+  onFileReceived?: (name: string) => void;
+  acceptFile?: (device: Device, file: FileOffer) => Promise<string | undefined>;
   allowLoopback?: boolean;
 }
 export function isLanAddress(address: string, allowLoopback = false): boolean {
@@ -45,8 +54,8 @@ function validateIdentity(value: PublicIdentity): void {
   if (d.engineFingerprint && d.engineFingerprint.replace(/:/g, '').toLowerCase() !== value.tlsFingerprint) throw new Error('Certificado do motor inconsistente.');
 }
 /** The HTTPS request is created only AFTER the remote certificate has been pinned. */
-export async function pinnedRequest(host: string, port: number, pin: string, path: string, envelope: Envelope): Promise<Envelope> {
-  const socket = await new Promise<TLSSocket>((resolve, reject) => {
+async function pinnedSocket(host: string, port: number, pin: string): Promise<TLSSocket> {
+  return new Promise<TLSSocket>((resolve, reject) => {
     const socket = connect({ host, port, rejectUnauthorized: false, minVersion: 'TLSv1.2' });
     const fail = (error: Error) => { socket.destroy(); reject(error); };
     socket.setNoDelay(true);
@@ -62,6 +71,9 @@ export async function pinnedRequest(host: string, port: number, pin: string, pat
       resolve(socket);
     });
   });
+}
+export async function pinnedRequest(host: string, port: number, pin: string, path: string, envelope: Envelope): Promise<Envelope> {
+  const socket = await pinnedSocket(host, port, pin);
   const agent = new Agent({ keepAlive: false, maxSockets: 1 });
   agent.createConnection = () => socket;
   const body = JSON.stringify(envelope);
@@ -82,13 +94,16 @@ export async function pinnedRequest(host: string, port: number, pin: string, pat
         } catch (error) { reject(error); }
       });
     });
-    req.setTimeout(path === '/pair' ? 50_000 : 4000, () => req.destroy(new Error('O aparelho não respondeu a tempo.')));
+    req.setTimeout(path === '/file-offer' ? 120_000 : path === '/pair' ? 50_000 : 4000, () => req.destroy(new Error('O aparelho não respondeu a tempo.')));
     req.on('error', error => { cleanup(); reject(error); });
     req.end(body);
   });
 }
 
 export class ControlServer {
+  private incomingFile: { token: string; sender: string; path: string; size: number; expires: number } | null = null;
+  private decidingFile = false;
+  private receivingFile = false;
   private server: Server | null = null;
   private invite: { tokenHash: string; expiresAt: number; session: string; remaining: number } | null = null;
   private pendingPair = false;
@@ -100,8 +115,8 @@ export class ControlServer {
   publicIdentity(): PublicIdentity {
     return { device: this.options.getDevice(), publicKey: this.options.identity.publicKey, tlsFingerprint: certificateFingerprint(this.options.identity.certificate) };
   }
-  private envelope(recipient: string, nonce: string, token?: string): Envelope {
-    const payload = JSON.stringify({ ...this.publicIdentity(), recipient, nonce, timestamp: Date.now(), ...(token ? { token } : {}) });
+  private envelope(recipient: string, nonce: string, token?: string, file?: FileOffer): Envelope {
+    const payload = JSON.stringify({ ...this.publicIdentity(), recipient, nonce, timestamp: Date.now(), token, file });
     return { payload, signature: signPayload(payload, this.options.identity.privateKey) };
   }
   private decode(envelope: Envelope, expectedKey?: string, nonce?: string): Payload {
@@ -115,7 +130,7 @@ export class ControlServer {
   }
   async start(port = 47856, host = '0.0.0.0'): Promise<void> {
     if (this.server) return;
-    const server = createServer({ key: this.options.identity.tlsKey, cert: this.options.identity.certificate, minVersion: 'TLSv1.2', requestTimeout: 5000, headersTimeout: 5000 }, (req, res) => { void this.handle(req, res); });
+    const server = createServer({ key: this.options.identity.tlsKey, cert: this.options.identity.certificate, minVersion: 'TLSv1.2', requestTimeout: 0, headersTimeout: 5000 }, (req, res) => { void this.handle(req, res); });
     this.server = server;
     server.maxConnections = 48;
     server.on('secureConnection', socket => { this.sockets.add(socket); socket.once('close', () => this.sockets.delete(socket)); socket.setTimeout(5000, () => socket.destroy()); });
@@ -169,7 +184,7 @@ export class ControlServer {
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const reply = (status: number, body: unknown) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); } };
     try {
-      if (req.method !== 'POST' || !['/pair', '/ping'].includes(req.url ?? '')) return reply(404, { error: 'Rota desconhecida.' });
+      if (req.method !== 'POST' || !['/pair', '/ping', '/file-offer', '/file'].includes(req.url ?? '')) return reply(404, { error: 'Rota desconhecida.' });
       const address = (req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
       if (!isLanAddress(address, this.options.allowLoopback)) return reply(403, { error: 'Disponível apenas na rede local.' });
       const now = Date.now();
@@ -177,6 +192,10 @@ export class ControlServer {
       const rate = this.attempts.get(address) ?? { count: 0, since: now };
       rate.count++; this.attempts.set(address, rate);
       if (rate.count > 120 || this.attempts.size > 1024) return reply(429, { error: 'Muitas tentativas. Aguarde um minuto.' });
+      if (req.url === '/file') {
+        await this.receiveFile(req);
+        return reply(200, { ok: true });
+      }
       const chunks: Buffer[] = []; let length = 0;
       for await (const chunk of req) {
         length += chunk.length;
@@ -219,9 +238,97 @@ export class ControlServer {
         const peer = this.options.getPeer(payload.device.id);
         if (!peer || fingerprint(peer.publicKey) !== fingerprint(payload.publicKey) || peer.tlsFingerprint !== payload.tlsFingerprint) throw new Error('Aparelho não pareado.');
         this.seen.set(nonceKey, now);
+        if (req.url === '/file-offer') {
+          const file = payload.file;
+          if (!file || typeof file.name !== 'string' || !file.name || file.name.length > 255 ||
+              /[\\/\x00-\x1f]/.test(file.name) || ['.', '..'].includes(file.name) ||
+              !Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_FILE_BYTES) throw new Error('Arquivo inválido ou acima de 2 GB.');
+          if (!this.options.acceptFile) throw new Error('O recebimento está indisponível.');
+          if (this.decidingFile || this.receivingFile || (this.incomingFile && this.incomingFile.expires > Date.now())) throw new Error('Já existe uma transferência em andamento.');
+          this.decidingFile = true;
+          req.socket.setTimeout(115_000);
+          try {
+            const destination = await this.options.acceptFile(peer.device, file);
+            if (!destination || res.destroyed || !this.options.getPeer(peer.device.id)) throw new Error('Transferência recusada ou cancelada.');
+            const token = randomBytes(32).toString('hex');
+            this.incomingFile = { token, sender: peer.device.id, size: file.size, path: destination, expires: Date.now() + 60_000 };
+            return reply(200, this.envelope(peer.device.id, payload.nonce, token));
+          } finally {
+            this.decidingFile = false;
+          }
+        }
       }
       reply(200, this.envelope(payload.device.id, payload.nonce));
     } catch (error) { reply(403, { error: error instanceof Error ? error.message : 'Falha na autenticação.' }); }
+  }
+  private async receiveFile(req: IncomingMessage): Promise<void> {
+    const header = req.headers['x-heymouse-transfer'];
+    if (typeof header !== 'string') throw new Error('Transferência inválida.');
+    const payload = this.decode(JSON.parse(Buffer.from(header, 'base64url').toString('utf8')));
+    const peer = this.options.getPeer(payload.device.id);
+    const file = this.incomingFile;
+    if (!peer || fingerprint(peer.publicKey) !== fingerprint(payload.publicKey) || peer.tlsFingerprint !== payload.tlsFingerprint ||
+        !file || file.expires <= Date.now() || file.sender !== peer.device.id || file.token !== payload.token ||
+        req.headers['content-length'] !== String(file.size)) throw new Error('Transferência não autorizada ou expirada.');
+    this.incomingFile = null;
+    this.receivingFile = true;
+    const temp = file.path + '.heymouse-' + randomBytes(12).toString('hex');
+    let bytes = 0;
+    req.socket.setTimeout(30_000);
+    try {
+      await pipeline(req, new Transform({
+        transform(chunk, _encoding, callback) {
+          bytes += chunk.length;
+          if (bytes > file.size) return callback(new Error('O arquivo excedeu o tamanho informado.'));
+          callback(null, chunk);
+        },
+      }), createWriteStream(temp, { flags: 'wx', mode: 0o600 }));
+      if (bytes !== file.size) throw new Error('Transferência incompleta.');
+      await rename(temp, file.path);
+      this.options.onFileReceived?.(path.basename(file.path));
+    } finally {
+      this.receivingFile = false;
+      await unlink(temp).catch(() => {});
+    }
+  }
+  async sendFile(peer: TrustedPeer, source: string, file: FileOffer, onProgress: (sent: number) => void): Promise<void> {
+    if (file.size > MAX_FILE_BYTES) throw new Error('O limite por arquivo é de 2 GB.');
+    const address = peer.device.addresses.find(ip => isLanAddress(ip, this.options.allowLoopback));
+    if (!address) throw new Error('O aparelho está sem endereço na rede local.');
+    const { id, controlPort } = peer.device;
+    const nonce = randomBytes(16).toString('hex');
+    const response = this.decode(await pinnedRequest(address, controlPort, peer.tlsFingerprint, '/file-offer', this.envelope(id, nonce, undefined, file)), peer.publicKey, nonce);
+    if (response.tlsFingerprint !== peer.tlsFingerprint || !response.token || !/^[a-f0-9]{64}$/.test(response.token)) throw new Error('O destino não autorizou o arquivo.');
+    const header = Buffer.from(JSON.stringify(this.envelope(id, randomBytes(16).toString('hex'), response.token))).toString('base64url');
+    const socket = await pinnedSocket(address, controlPort, peer.tlsFingerprint);
+    const agent = new Agent({ keepAlive: false, maxSockets: 1 });
+    agent.createConnection = () => socket;
+    try {
+      let sent = 0;
+      let lastUpdate = 0;
+      const result = new Promise<void>((resolve, reject) => {
+        const req = request({ host: address, port: controlPort, path: '/file', method: 'POST', agent,
+          headers: { 'content-length': file.size, 'x-heymouse-transfer': header, connection: 'close' } }, res => {
+          res.resume();
+          res.once('error', reject);
+          res.once('end', () => res.statusCode === 200 ? resolve() : reject(new Error('O destino não conseguiu salvar o arquivo.')));
+        });
+        req.setTimeout(30_000, () => req.destroy(new Error('A transferência parou de responder.')));
+        req.once('error', reject);
+        const input = createReadStream(source);
+        const meter = new Transform({ transform(chunk, _encoding, done) {
+          sent += chunk.length;
+          if (sent > file.size) return done(new Error('O arquivo foi alterado durante o envio.'));
+          if (Date.now() - lastUpdate > 200) { lastUpdate = Date.now(); onProgress(sent); }
+          done(null, chunk);
+        } });
+        void pipeline(input, meter, req).catch(reject);
+      });
+      await result;
+    } finally {
+      agent.destroy();
+      socket.destroy();
+    }
   }
   async pair(code: string): Promise<TrustedPeer> {
     if (typeof code !== 'string' || code.length > 12000) throw new Error('Código de pareamento inválido.');

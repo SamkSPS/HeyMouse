@@ -1,28 +1,12 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent, type ReactNode } from 'react';
 import {
   Activity, ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, CircleHelp,
-  Copy, FolderOpen, Headphones, Keyboard, Laptop, Link2, LoaderCircle, LockKeyhole,
+  Copy, FileUp, FolderOpen, Headphones, Keyboard, Laptop, Link2, LoaderCircle, LockKeyhole,
   Monitor, MoreHorizontal, Mouse, Move, Network, Pause, Play, Plus, Radio,
   RefreshCw, Search, Settings2, ShieldCheck, SlidersHorizontal, Terminal,
   Trash2, Volume2, Wifi, X, Zap,
 } from 'lucide-react';
-import type { AppState, Device, ScreenPlacement, Settings } from '../shared/types';
-
-interface HeyMouseBridge {
-  getState(): Promise<AppState>;
-  onState(listener: (state: AppState) => void): () => void;
-  updateSettings(patch: Partial<Settings>): Promise<AppState>;
-  setLayout(layout: ScreenPlacement[]): Promise<AppState>;
-  refreshDiscovery(): Promise<void>;
-  createInvite(): Promise<{ code: string; expiresAt: number }>;
-  pair(code: string): Promise<AppState>;
-  forgetDevice(id: string): Promise<AppState>;
-  startSharing(): Promise<AppState>;
-  stopSharing(): Promise<AppState>;
-  selectEngine(): Promise<AppState>;
-  openExternal(url: string): Promise<void>;
-  copyText(text: string): Promise<void>;
-}
+import type { AppState, Device, HeyMouseBridge, ScreenPlacement, Settings } from '../shared/types';
 
 const bridge = (window as unknown as { heymouse?: HeyMouseBridge }).heymouse;
 type Page = 'connections' | 'devices' | 'audio' | 'settings';
@@ -67,12 +51,13 @@ function Dialog({ title, subtitle, onClose, children, wide = false }: { title: s
   return <div className="dialog-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><div className={`dialog ${wide ? 'dialog-wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="dialog-title" tabIndex={-1} ref={dialogRef}><div className="dialog-header"><div><h2 id="dialog-title">{title}</h2>{subtitle && <p>{subtitle}</p>}</div><button className="icon-button" aria-label="Fechar janela" onClick={onClose}><X size={19} /></button></div>{children}</div></div>;
 }
 
-function Workspace({ state, onPair, onLayout, onDevice }: { state: AppState; onPair: () => void; onLayout: (layout: ScreenPlacement[]) => Promise<unknown>; onDevice: (device: Device) => void }) {
+function Workspace({ state, onPair, onLayout, onDevice, onSend }: { state: AppState; onPair: () => void; onLayout: (layout: ScreenPlacement[]) => Promise<unknown>; onDevice: (device: Device) => void; onSend: (device: Device, file?: File) => void }) {
   const devices = [state.local, ...state.devices.filter(device => device.paired)];
   const canvasRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<{ id: string; startX: number; startY: number; dx: number; dy: number } | null>(null);
   const [width, setWidth] = useState(850);
   const [hint, setHint] = useState('');
+  const [fileTarget, setFileTarget] = useState<string | null>(null);
   useEffect(() => {
     const observer = new ResizeObserver(entries => setWidth(entries[0].contentRect.width));
     if (canvasRef.current) observer.observe(canvasRef.current);
@@ -113,14 +98,31 @@ function Workspace({ state, onPair, onLayout, onDevice }: { state: AppState; onP
     await onLayout(placements.map(item => item.deviceId === deviceId ? { ...item, x, y } : item));
   };
   return <section className="workspace panel">
-    <div className="panel-heading"><div><h2>Seu espaço de trabalho <span className="count-badge">{devices.length}</span></h2><p>Organize as telas como elas estão na sua mesa.</p></div><span className="subtle-label"><Move size={14} /> Arraste para organizar</span></div>
+    <div className="panel-heading"><div><h2>Seu espaço de trabalho <span className="count-badge">{devices.length}</span></h2><p>Organize as telas ou solte um arquivo sobre o computador de destino.</p></div><span className="subtle-label"><Move size={14} /> Arraste para organizar</span></div>
     <div className={`screen-canvas ${drag ? 'is-dragging' : ''}`} ref={canvasRef}>
       <div className="canvas-corner"><span className="tiny-dot" /> REDE LOCAL</div>
       {devices.map(device => {
         const placement = placements.find(item => item.deviceId === device.id)!;
         const local = device.id === state.local.id;
-        return <div key={device.id} className={`screen-group ${local ? 'is-local' : ''} ${!device.online ? 'is-offline' : ''} ${drag?.id === device.id ? 'is-moving' : ''}`} style={pointStyle(placement.x, placement.y, device.id)} onPointerDown={event => beginDrag(event, device.id)} onPointerMove={event => { if (drag?.id === device.id) setDrag({ ...drag, dx: event.clientX - drag.startX, dy: event.clientY - drag.startY }); }} onPointerUp={() => void finishDrag()} onPointerCancel={() => setDrag(null)} onKeyDown={event => void moveWithKeyboard(event, device.id)} tabIndex={0} role="group" aria-label={`${device.name}. Use as setas para mover a tela.`}>
-          <div className="monitor-shell"><div className="monitor-surface"><div className="monitor-top"><PlatformIcon platform={device.platform} size={19} /><button aria-label={`Detalhes de ${device.name}`} onClick={() => onDevice(device)}><MoreHorizontal size={17} /></button></div><strong>{device.name}</strong><span className="monitor-os">{platformNames[device.platform]} {local ? '· Este computador' : ''}</span><div className="monitor-status"><span className={`status-dot ${device.online ? 'online' : ''}`} />{local ? (state.settings.engine.role === 'server' ? 'Mouse e teclado daqui' : 'Recebe mouse e teclado') : device.online ? 'Na sua rede' : 'Fora da rede'}</div></div></div><div className="monitor-neck" /><div className="monitor-base" /><div className="screen-caption">{local ? <><Mouse size={12} /><Keyboard size={13} /><span>ESTE COMPUTADOR</span></> : <><span>{device.addresses[0] ?? 'Aguardando endereço'}</span>{state.latency[device.id] !== undefined && device.online && <span className="latency-label">{state.latency[device.id].toFixed(0)} ms</span>}</>}</div>
+        const acceptsFile = !local && device.online && !state.transfer;
+        return <div key={device.id} className={`screen-group ${fileTarget === device.id ? 'file-target' : ''} ${local ? 'is-local' : ''} ${!device.online ? 'is-offline' : ''} ${drag?.id === device.id ? 'is-moving' : ''}`} style={pointStyle(placement.x, placement.y, device.id)}
+          onDragOver={event => {
+            if (!event.dataTransfer.types.includes('Files')) return;
+            event.preventDefault();
+            event.dataTransfer.dropEffect = acceptsFile ? 'copy' : 'none';
+            if (acceptsFile) setFileTarget(device.id);
+          }}
+          onDragLeave={event => {
+            if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+            setFileTarget(null);
+          }}
+          onDrop={event => {
+            event.preventDefault();
+            setFileTarget(null);
+            if (acceptsFile && event.dataTransfer.files.length) onSend(device, event.dataTransfer.files[0]);
+          }}
+          onPointerDown={event => beginDrag(event, device.id)} onPointerMove={event => { if (drag?.id === device.id) setDrag({ ...drag, dx: event.clientX - drag.startX, dy: event.clientY - drag.startY }); }} onPointerUp={() => void finishDrag()} onPointerCancel={() => setDrag(null)} onKeyDown={event => void moveWithKeyboard(event, device.id)} tabIndex={0} role="group" aria-label={`${device.name}. Use as setas para mover a tela.`}>
+          <div className="monitor-shell"><div className="monitor-surface"><div className="monitor-top"><PlatformIcon platform={device.platform} size={19} /><button aria-label={`Detalhes de ${device.name}`} onClick={() => onDevice(device)}><MoreHorizontal size={17} /></button></div><strong>{device.name}</strong><span className="monitor-os">{platformNames[device.platform]} {local ? '· Este computador' : ''}</span><div className="monitor-status"><span className={`status-dot ${device.online ? 'online' : ''}`} />{local ? (state.settings.engine.role === 'server' ? 'Mouse e teclado daqui' : 'Recebe mouse e teclado') : device.online ? 'Na sua rede' : 'Fora da rede'}</div></div></div>{fileTarget === device.id && <div className="file-drop-label"><FileUp size={16} /> Solte para enviar</div>}<div className="monitor-neck" /><div className="monitor-base" /><div className="screen-caption">{local ? <><Mouse size={12} /><Keyboard size={13} /><span>ESTE COMPUTADOR</span></> : <><span>{device.addresses[0] ?? 'Aguardando endereço'}</span>{state.latency[device.id] !== undefined && device.online && <span className="latency-label">{state.latency[device.id].toFixed(0)} ms</span>}</>}</div>
         </div>;
       })}
       {devices.length === 1 && <button className="add-screen" style={pointStyle(placements[0].x + 1, placements[0].y)} onClick={onPair}><span className="add-screen-icon"><Plus size={22} /></span><strong>Mais uma tela?</strong><span>Conecte outro computador</span></button>}
@@ -173,6 +175,11 @@ export default function App() {
   useEffect(() => { if (!bridge) return; let active = true; bridge.getState().then(value => { if (active) setState(value); }).catch(error => { if (active) setLoadError(errorText(error)); }); const unsubscribe = bridge.onState(value => { if (active) setState(value); }); return () => { active = false; unsubscribe(); }; }, []);
   useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
   const run = useCallback(async (action: () => Promise<unknown>) => { try { await action(); } catch (error) { showError(errorText(error)); } }, [showError]);
+  useEffect(() => bridge?.onFileReceived(name => showError(`Arquivo recebido: ${name}`)), [showError]);
+  const send = (device: Device, file?: File) => void run(async () => {
+    const sent = file ? await bridge!.sendDroppedFile(device.id, file) : await bridge!.sendFile(device.id);
+    if (sent) showError(`Arquivo salvo em ${device.name}.`);
+  });
   const closePair = useCallback(() => setPairOpen(false), []);
   const closeDevice = useCallback(() => { setSelectedDevice(null); setConfirmForget(false); }, []);
   const showDevice = (device: Device) => { setConfirmForget(false); setSelectedDevice(device); };
@@ -187,16 +194,22 @@ export default function App() {
     audio: ['O próximo som vem aí.', 'Um espaço conectado também merece um áudio conectado.'],
     settings: ['Um setup com a sua cara.', 'Ajuste o HeyMouse ao seu jeito de trabalhar.'],
   };
-  return <div className="app-shell">
+  return <div className="app-shell" onDragOver={event => event.preventDefault()} onDrop={event => event.preventDefault()}>
     <aside className="sidebar"><div className="brand"><BrandMark /><span>HeyMouse<span className="brand-period">.</span></span></div><span className="sidebar-label">SEU WORKSPACE</span><nav aria-label="Navegação principal"><button className={page === 'connections' ? 'active' : ''} onClick={() => setPage('connections')}><Network size={19} /><span>Conexões</span>{page === 'connections' && <span className="nav-active-dot" />}</button><button className={page === 'devices' ? 'active' : ''} onClick={() => setPage('devices')}><Monitor size={19} /><span>Dispositivos</span>{paired.length > 0 && <span className="nav-count">{paired.length + 1}</span>}</button><button className={page === 'audio' ? 'active' : ''} onClick={() => setPage('audio')}><Headphones size={19} /><span>Áudio</span><span className="soon-tag">EM BREVE</span></button><div className="nav-divider" /><button className={page === 'settings' ? 'active' : ''} onClick={() => setPage('settings')}><Settings2 size={19} /><span>Configurações</span></button></nav><div className="sidebar-bottom"><div className="network-card"><span className="network-card-icon"><Wifi size={17} /></span><div><strong>{state?.discovery.active ? 'Em casa na sua rede' : 'Sua rede, seu espaço'}</strong><span>{state?.discovery.active ? 'Descoberta automática ativa' : 'Conexão direta entre aparelhos'}</span></div><span className={`status-dot ${state?.discovery.active ? 'online' : ''}`} /></div><div className="sidebar-footer"><span>HEY MOUSE <span>v0.1</span></span><button className="icon-button" aria-label="Ajuda para conectar" onClick={() => { setPage('connections'); showError('Instale o HeyMouse nos dois computadores, conecte ambos à mesma rede e use “Parear dispositivo”. Em Configurações, escolha qual compartilha o mouse e o teclado.'); }}><CircleHelp size={16} /></button></div></div></aside>
     <main className="main-content"><header className="topbar"><div className="breadcrumb">Workspace <ChevronRight size={12} /><span>{page === 'connections' ? 'Conexões' : page === 'devices' ? 'Dispositivos' : page === 'settings' ? 'Configurações' : 'Áudio'}</span></div><div className="topbar-right"><span className="topbar-local"><LockKeyhole size={13} /> Local por natureza</span><span className="topbar-divider" /><span className="avatar">{state?.local.name.substring(0, 2).toUpperCase() ?? 'HM'}</span></div></header>
       {!state ? <div className="desktop-unavailable"><div className="welcome-art"><BrandMark size={54} /><span /><Monitor size={52} /></div><Badge tone="green">SEU NOVO WORKSPACE</Badge><h1>{loadError ? 'Não foi possível iniciar' : bridge ? 'Preparando seu espaço…' : 'Abra o HeyMouse no desktop'}</h1><p>{loadError || (bridge ? 'Estamos identificando este computador e sua rede local.' : 'A descoberta de aparelhos e o compartilhamento de mouse e teclado funcionam no aplicativo para Windows, macOS e Linux.')}</p>{bridge && !loadError && <LoaderCircle size={22} className="spin" />}{loadError && <button className="button primary" onClick={() => window.location.reload()}><RefreshCw size={16} /> Tentar novamente</button>}<div className="welcome-platforms"><PlatformIcon platform="win32" /><span>Windows</span><i /> <PlatformIcon platform="darwin" /><span>macOS</span><i /><PlatformIcon platform="linux" /><span>Linux</span></div></div> : <div className={`page-content page-${page}`}>
         <div className="page-heading"><div><div className="eyebrow">{page === 'connections' ? 'BEM-VINDO AO SEU WORKSPACE' : page === 'devices' ? 'SEU ECOSSISTEMA' : page === 'settings' ? 'PREFERÊNCIAS' : 'EXPERIMENTAL · PLANEJADO'}</div><h1>{pageTitles[page][0]}</h1><p>{pageTitles[page][1]}</p></div>{page !== 'audio' && page !== 'settings' && <button className="button primary" onClick={() => setPairOpen(true)}><Plus size={17} /> Parear dispositivo</button>}</div>
         {state.discovery.error && <div className="notice notice-warning"><Wifi size={17} /><span>{state.discovery.error}</span><button onClick={() => void refresh()} disabled={refreshing}>Tentar novamente</button></div>}
         {state.engine.status === 'error' && <div className="notice notice-warning"><Zap size={17} /><span>{state.engine.message}</span><button onClick={() => setPage('settings')}>Ver configurações</button></div>}
+        {state.transfer && <div className="notice file-progress" role="status">
+          <FileUp size={18} />
+          <span><strong>{state.transfer.name}</strong> · {state.transfer.phase === 'waiting'
+            ? `Aguardando ${state.transfer.peer} aceitar` : `Enviando para ${state.transfer.peer}`}</span>
+          {state.transfer.phase === 'sending' && <progress max={Math.max(1, state.transfer.total)} value={state.transfer.sent} aria-label="Progresso do envio" />}
+        </div>}
         {page === 'connections' && <>
           <div className="sharing-strip"><div className={`sharing-symbol ${running ? 'is-running' : ''}`}>{running ? <Radio size={21} /> : <Mouse size={21} />}</div><div className="sharing-copy"><div><strong>{running ? 'Seu espaço está conectado' : starting ? 'Conectando seu espaço…' : 'Pronto para conectar'}</strong><Badge tone={running ? 'green' : 'muted'}><span className={`status-dot ${running ? 'online' : ''}`} />{running ? 'Compartilhando' : starting ? 'Iniciando' : 'Pausado'}</Badge></div><p>{state.engine.message || (state.settings.engine.role === 'server' ? 'O mouse e o teclado deste computador vão com você.' : 'Este computador receberá o mouse e o teclado de outro aparelho.')}</p></div><button className={`button ${running ? 'secondary' : 'light'}`} onClick={() => void toggleSharing()} disabled={busy}>{busy || starting ? <LoaderCircle size={15} className="spin" /> : running ? <Pause size={15} /> : <Play size={15} fill="currentColor" />}{running ? 'Pausar' : starting ? 'Cancelar' : 'Iniciar conexão'}</button></div>
-          <Workspace state={state} onPair={() => setPairOpen(true)} onLayout={layout => run(async () => setState(await bridge!.setLayout(layout)))} onDevice={showDevice} />
+          <Workspace state={state} onPair={() => setPairOpen(true)} onLayout={layout => run(async () => setState(await bridge!.setLayout(layout)))} onDevice={showDevice} onSend={send} />
           <div className="below-workspace"><section className="panel devices-panel"><div className="panel-heading compact-heading"><div><h2>Seus dispositivos <span className="count-badge">{paired.length + 1}</span></h2></div><button className="text-button" onClick={() => setPage('devices')}>Ver todos <ArrowUpRight size={14} /></button></div><DeviceRow device={state.local} localId={state.local.id} onClick={() => showDevice(state.local)} />{paired.slice(0, 2).map(device => <DeviceRow key={device.id} device={device} localId={state.local.id} latency={state.latency[device.id]} onClick={() => showDevice(device)} />)}{paired.length === 0 && <button className="empty-device-row" onClick={() => setPairOpen(true)}><span><Plus size={16} /></span><div><strong>Um lugar para o próximo computador</strong><small>Pareie uma vez. Reencontre automaticamente.</small></div><ArrowRight size={16} /></button>}</section><section className="discovery-card"><div className="discovery-orbit"><Radio size={27} /><span className={state.discovery.active ? 'is-searching' : ''} /></div><h3>{state.discovery.active ? 'Sempre de olho na sua rede' : 'Encontre sua próxima tela'}</h3><p>{discovered.length ? `${discovered.length} ${discovered.length === 1 ? 'aparelho disponível' : 'aparelhos disponíveis'} para parear na sua rede.` : 'Seus aparelhos pareados voltam a aparecer, mesmo quando o endereço IP muda.'}</p><button className="text-button" onClick={() => void refresh()} disabled={refreshing}><RefreshCw size={14} className={refreshing ? 'spin' : ''} />{refreshing ? 'Buscando…' : 'Buscar dispositivos'}</button></section></div>
           <footer className="workspace-footer"><span><ShieldCheck size={14} /> Pareamento por identidade</span><span><Zap size={14} /> Conexão direta na LAN</span><button onClick={() => setPage('audio')}><Headphones size={14} /> Áudio está no radar <ArrowUpRight size={12} /></button></footer>
         </>}
@@ -206,7 +219,7 @@ export default function App() {
       </div>}
     </main>
     {pairOpen && state && <PairDialog onClose={closePair} onState={setState} onError={showError} />}
-    {selectedDevice && state && (() => { const device = selectedDevice.id === state.local.id ? state.local : state.devices.find(item => item.id === selectedDevice.id) ?? selectedDevice; const local = device.id === state.local.id; return <Dialog title={device.name} subtitle={`${platformNames[device.platform]} · ${local ? 'Este computador' : device.paired ? 'Aparelho pareado' : 'Encontrado na rede'}`} onClose={closeDevice}><div className="device-detail"><div className="detail-device-top"><span className="detail-device-icon"><PlatformIcon platform={device.platform} size={36} /></span><div><Badge tone={device.online ? 'green' : 'muted'}><span className={`status-dot ${device.online ? 'online' : ''}`} />{device.online ? 'Disponível na rede' : 'Offline'}</Badge><p>{device.hostname}</p></div></div><dl><div><dt>Endereço na rede</dt><dd>{device.addresses.join(', ') || 'Aguardando descoberta'}</dd></div><div><dt>Função</dt><dd>{device.role === 'server' ? 'Compartilha mouse e teclado' : 'Recebe mouse e teclado'}</dd></div><div><dt>Motor de compartilhamento</dt><dd>{device.engineAvailable ? 'Disponível' : 'Não detectado'}</dd></div>{!local && state.latency[device.id] !== undefined && device.online && <div><dt>Tempo de resposta na rede</dt><dd>{state.latency[device.id].toFixed(1)} ms</dd></div>}<div><dt>Identidade permanente</dt><dd className="monospace">{device.id}</dd></div><div><dt>Impressão digital</dt><dd className="monospace fingerprint">{device.fingerprint || 'Disponível após a identificação'}</dd></div></dl>{local ? <button className="button secondary full-width" onClick={() => { closeDevice(); setPage('settings'); }}><Settings2 size={16} /> Configurar este computador</button> : device.paired ? confirmForget ? <div className="forget-confirm"><p>Remover <strong>{device.name}</strong> do seu espaço? Para conectar novamente, será necessário outro convite.</p><div><button className="button secondary" onClick={() => setConfirmForget(false)}>Cancelar</button><button className="button danger" onClick={() => void run(async () => { setState(await bridge!.forgetDevice(device.id)); closeDevice(); })}><Trash2 size={15} /> Remover aparelho</button></div></div> : <button className="button ghost-danger full-width" onClick={() => setConfirmForget(true)}><Trash2 size={15} /> Esquecer dispositivo</button> : <button className="button primary full-width" onClick={() => { closeDevice(); setPairOpen(true); }}><Link2 size={16} /> Parear este aparelho</button>}</div></Dialog>; })()}
+    {selectedDevice && state && (() => { const device = selectedDevice.id === state.local.id ? state.local : state.devices.find(item => item.id === selectedDevice.id) ?? selectedDevice; const local = device.id === state.local.id; return <Dialog title={device.name} subtitle={`${platformNames[device.platform]} · ${local ? 'Este computador' : device.paired ? 'Aparelho pareado' : 'Encontrado na rede'}`} onClose={closeDevice}><div className="device-detail"><div className="detail-device-top"><span className="detail-device-icon"><PlatformIcon platform={device.platform} size={36} /></span><div><Badge tone={device.online ? 'green' : 'muted'}><span className={`status-dot ${device.online ? 'online' : ''}`} />{device.online ? 'Disponível na rede' : 'Offline'}</Badge><p>{device.hostname}</p></div></div><dl><div><dt>Endereço na rede</dt><dd>{device.addresses.join(', ') || 'Aguardando descoberta'}</dd></div><div><dt>Função</dt><dd>{device.role === 'server' ? 'Compartilha mouse e teclado' : 'Recebe mouse e teclado'}</dd></div><div><dt>Motor de compartilhamento</dt><dd>{device.engineAvailable ? 'Disponível' : 'Não detectado'}</dd></div>{!local && state.latency[device.id] !== undefined && device.online && <div><dt>Tempo de resposta na rede</dt><dd>{state.latency[device.id].toFixed(1)} ms</dd></div>}<div><dt>Identidade permanente</dt><dd className="monospace">{device.id}</dd></div><div><dt>Impressão digital</dt><dd className="monospace fingerprint">{device.fingerprint || 'Disponível após a identificação'}</dd></div></dl>{!local && device.paired && device.online && <button className="button secondary full-width" disabled={!!state.transfer} onClick={() => { closeDevice(); send(device); }}><FileUp size={16} /> Enviar arquivo</button>}{local ? <button className="button secondary full-width" onClick={() => { closeDevice(); setPage('settings'); }}><Settings2 size={16} /> Configurar este computador</button> : device.paired ? confirmForget ? <div className="forget-confirm"><p>Remover <strong>{device.name}</strong> do seu espaço? Para conectar novamente, será necessário outro convite.</p><div><button className="button secondary" onClick={() => setConfirmForget(false)}>Cancelar</button><button className="button danger" onClick={() => void run(async () => { setState(await bridge!.forgetDevice(device.id)); closeDevice(); })}><Trash2 size={15} /> Remover aparelho</button></div></div> : <button className="button ghost-danger full-width" onClick={() => setConfirmForget(true)}><Trash2 size={15} /> Esquecer dispositivo</button> : <button className="button primary full-width" onClick={() => { closeDevice(); setPairOpen(true); }}><Link2 size={16} /> Parear este aparelho</button>}</div></Dialog>; })()}
     {toast && <div className="toast" role="status"><span>{toast}</span><button className="icon-button" aria-label="Fechar aviso" onClick={() => setToast('')}><X size={17} /></button></div>}
   </div>;
 }

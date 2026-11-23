@@ -25,6 +25,12 @@ Os aparelhos pareados mantêm sua identidade quando o endereço IP muda. A desco
 
 Se o Deskflow já estiver rodando, encerre-o normalmente antes de iniciar o compartilhamento pelo HeyMouse. A medição em milissegundos na interface representa o tempo de resposta do canal de controle. A latência do mouse e teclado precisa ser medida separadamente.
 
+## Enviar arquivos
+
+Na aba **Conexões**, arraste um arquivo do Explorer ou Finder até o cartão do computador de destino. Também é possível abrir os detalhes do aparelho e clicar em **Enviar arquivo**. No destino, escolha onde salvar e clique em **Aceitar e salvar**.
+
+O envio funciona nos dois sentidos entre aparelhos pareados, pela rede local. O limite é de um arquivo de até 2 GB por envio. O gesto de soltar acontece dentro do mapa de telas do HeyMouse.
+
 ## macOS
 
 No Mac, com Node.js 24 instalado, execute na pasta do projeto:

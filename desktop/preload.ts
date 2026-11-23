@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { AppState, HeyMouseBridge, Settings, ScreenPlacement } from '../shared/types';
 const api: HeyMouseBridge = {
   getState: () => ipcRenderer.invoke('heymouse:state'),
@@ -14,5 +14,16 @@ const api: HeyMouseBridge = {
   selectEngine: () => ipcRenderer.invoke('heymouse:select-engine'),
   openExternal: (url: string) => ipcRenderer.invoke('heymouse:external', url),
   copyText: (text: string) => ipcRenderer.invoke('heymouse:copy', text),
+  sendFile: deviceId => ipcRenderer.invoke('heymouse:send-file', deviceId),
+  sendDroppedFile: async (deviceId, file) => {
+    const path = webUtils.getPathForFile(file);
+    if (!path) throw new Error('Arraste um arquivo do Explorer ou do Finder.');
+    return ipcRenderer.invoke('heymouse:send-file', deviceId, path);
+  },
+  onFileReceived: listener => {
+    const handler = (_event: unknown, name: string) => listener(name);
+    ipcRenderer.on('heymouse:file-received', handler);
+    return () => ipcRenderer.removeListener('heymouse:file-received', handler);
+  },
 };
 contextBridge.exposeInMainWorld('heymouse', api);

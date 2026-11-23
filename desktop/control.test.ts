@@ -4,9 +4,14 @@ import { ControlServer } from './control';
 import { decodeAnnouncement, encodeAnnouncement, type DiscoveredDevice } from './discovery';
 import { certificateFingerprint, createIdentity, fingerprint, identityId, signPayload, verifyPayload } from './identity';
 import type { TrustedPeer } from './store';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 test('six-digit pairing persists trust only after the host confirms', async () => {
   let respond: ((approved: boolean) => void) | undefined;
+  let destination: string | undefined;
+  const directory = await mkdtemp(join(tmpdir(), 'heymouse-transfer-'));
   const makeDevice = async (name: string) => {
     const identity = await createIdentity();
     const peers = new Map<string, TrustedPeer>();
@@ -23,6 +28,7 @@ test('six-digit pairing persists trust only after the host confirms', async () =
       getPeer: id => peers.get(id),
       onPair: async peer => { peers.set(peer.device.id, peer); },
       confirmPair: async () => new Promise<boolean>(resolve => { respond = resolve; }),
+      acceptFile: async () => destination,
     });
     return { control, identity, peers, discovered, getDevice };
   };
@@ -67,7 +73,17 @@ test('six-digit pairing persists trust only after the host confirms', async () =
     assert.equal(joiner.peers.get(host.getDevice().id)?.publicKey, host.identity.publicKey);
     assert.equal(host.control.pairingSession(), undefined);
     await assert.rejects(joiner.control.pair(newCode), /já utilizado/);
+    const source = join(directory, 'original.bin');
+    const bytes = Buffer.alloc(160_000, 0x94);
+    await writeFile(source, bytes);
+    const target = joiner.peers.get(host.getDevice().id)!;
+    const file = { name: 'original.bin', size: bytes.length };
+    await assert.rejects(joiner.control.sendFile(target, source, file, () => {}), /recusada/);
+    destination = join(directory, 'received.bin');
+    await joiner.control.sendFile(target, source, file, () => {});
+    assert.deepEqual(await readFile(destination), bytes);
   } finally {
     await Promise.all([host.control.stop(), joiner.control.stop()]);
+    await rm(directory, { recursive: true, force: true });
   }
 });

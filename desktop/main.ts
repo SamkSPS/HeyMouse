@@ -1,12 +1,13 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, shell, Tray, type IpcMainInvokeEvent } from 'electron';
-import { join } from 'node:path';
+import { basename, isAbsolute, join } from 'node:path';
+import { stat } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import type { AppState, Device, Settings, ScreenPlacement } from '../shared/types';
 import { certificateFingerprint, fingerprint, identityId, loadIdentity, signPayload, verifyPayload, type Identity } from './identity';
 import { Store, validateLayout, validateSettings, type TrustedPeer } from './store';
 import { Discovery, ipv4Interfaces, type DiscoveredDevice } from './discovery';
-import { ControlServer } from './control';
+import { ControlServer, type FileOffer } from './control';
 import { EngineManager, engineScreenName } from './engine';
 
 app.setName('HeyMouse');
@@ -21,6 +22,8 @@ let discoveryStatus: AppState['discovery'] = { active: false, error: null };
 const discovered = new Map<string, Device>();
 const latency: Record<string, number> = {};
 const notices: string[] = [];
+let transfer: AppState['transfer'];
+let sendingFile = false;
 let pollTimer: ReturnType<typeof setInterval> | undefined, publishTimer: ReturnType<typeof setTimeout> | undefined;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let mutations: Promise<unknown> = Promise.resolve();
@@ -38,7 +41,7 @@ function state(): AppState {
   const peers = store.state.peers.map(peer => peer.device);
   return { local: localDevice(), devices: [...peers, ...[...discovered.values()].filter(d => !peers.some(p => p.id === d.id))],
     settings: store.state.settings, engine: engine.getStatus(), discovery: discoveryStatus,
-    layout: store.state.layout, latency: { ...latency }, notices: [...notices] };
+    layout: store.state.layout, latency: { ...latency }, notices: [...notices], transfer };
 }
 function publish() {
   if (publishTimer || !store || !engine) return;
@@ -76,6 +79,52 @@ async function confirmPair(device: Device, signal: AbortSignal): Promise<boolean
   if (signal.aborted) return false;
   discovery.refresh();
   return result.response === 1;
+}
+async function acceptFile(device: Device, file: FileOffer): Promise<string | undefined> {
+  if (closing) return;
+  if (!window) await createWindow();
+  if (!window || closing) return;
+  window.show();
+  window.focus();
+  const name = file.name.replace(/[<>:"|?*]/g, '_').replace(/[. ]+$/, '') || 'arquivo';
+  const size = new Intl.NumberFormat('pt-BR').format(file.size);
+  const result = await dialog.showSaveDialog(window, {
+    title: `Receber de ${device.name}`,
+    message: `${device.name} quer enviar ${file.name} (${size} bytes).`,
+    defaultPath: join(app.getPath('downloads'), name),
+    buttonLabel: 'Aceitar e salvar',
+  });
+  return result.canceled || closing ? undefined : result.filePath;
+}
+async function sendFile(id: string, droppedPath?: string): Promise<boolean> {
+  const peer = store.state.peers.find(item => item.device.id === id && item.device.online);
+  if (!peer) throw new Error('Escolha um aparelho pareado que esteja na rede.');
+  if (sendingFile) throw new Error('Aguarde o envio atual terminar.');
+  sendingFile = true;
+  try {
+    let source = droppedPath;
+    if (source === undefined) {
+      if (!window) return false;
+      const result = await dialog.showOpenDialog(window, { title: `Enviar para ${peer.device.name}`, properties: ['openFile'] });
+      if (result.canceled) return false;
+      source = result.filePaths[0];
+    }
+    if (typeof source !== 'string' || !isAbsolute(source)) throw new Error('Arquivo local inválido.');
+    const info = await stat(source);
+    if (!info.isFile()) throw new Error('Escolha um arquivo. Para enviar uma pasta, compacte-a antes.');
+    const file = { name: basename(source), size: info.size };
+    transfer = { name: file.name, peer: peer.device.name, sent: 0, total: file.size, phase: 'waiting' };
+    publish();
+    await control.sendFile(peer, source, file, sent => {
+      transfer = { name: file.name, peer: peer.device.name, sent, total: file.size, phase: 'sending' };
+      publish();
+    });
+    return true;
+  } finally {
+    sendingFile = false;
+    transfer = undefined;
+    publish();
+  }
 }
 function engineOptions() {
   return { settings: store.state.settings.engine, localDeviceId: localId, devices: store.state.peers.map(p => p.device),
@@ -147,6 +196,7 @@ function bind(channel: string, handler: (...args: any[]) => unknown, serial = tr
   });
 }
 function registerIpc() {
+  bind('send-file', sendFile, false);
   bind('state', () => state(), false);
   bind('settings', async (patch: Partial<Settings>) => {
     const current = store.state.settings;
@@ -235,7 +285,11 @@ async function boot() {
   store = new Store(app.getPath('userData'), localId); await store.load();
   store.state.settings.engine.screenName = engineScreenName(localId);
   engine = new EngineManager({ dataDir: app.getPath('userData'), resourcesDir: app.isPackaged ? join(process.resourcesPath, 'engine') : join(app.getAppPath(), 'resources/engine'), onStatus: publish, onLog: publish });
-  control = new ControlServer({ identity, getDevice: localDevice, getDiscovered: () => discovery?.devices() ?? [], getPeer: id => store.state.peers.find(p => p.device.id === id), onPair: paired, confirmPair });
+  control = new ControlServer({
+    identity, getDevice: localDevice, getDiscovered: () => discovery?.devices() ?? [],
+    getPeer: id => store.state.peers.find(p => p.device.id === id), onPair: paired, confirmPair, acceptFile,
+    onFileReceived: name => { if (window && !window.isDestroyed()) window.webContents.send('heymouse:file-received', name); },
+  });
   try { await control.start(); } catch (error) { notice(`Pareamento indisponível: ${(error as Error).message}`); }
   engineAvailable = (await engine.detect(store.state.settings.engine.executablePath)).available;
   discovery = new Discovery({ getAnnouncement: () => ({ ...localDevice(), publicKey: identity.publicKey, pairingSession: control.pairingSession() }), sign: payload => signPayload(payload, identity.privateKey), verify: verifyPayload });

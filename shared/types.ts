@@ -21,6 +21,7 @@ export interface AppState {
   local: Device; devices: Device[]; settings: Settings; engine: EngineStatus;
   discovery: { active: boolean; error: string | null }; layout: ScreenPlacement[];
   latency: Record<string, number>; notices: string[];
+  transfer?: { name: string; peer: string; sent: number; total: number; phase: 'waiting' | 'sending' };
 }
 export interface PairInvite { code: string; expiresAt: number }
 export interface HeyMouseBridge {
@@ -37,4 +38,7 @@ export interface HeyMouseBridge {
   selectEngine(): Promise<AppState>;
   openExternal(url: string): Promise<void>;
   copyText(text: string): Promise<void>;
+  sendFile(deviceId: string): Promise<boolean>;
+  sendDroppedFile(deviceId: string, file: File): Promise<boolean>;
+  onFileReceived(listener: (name: string) => void): () => void;
 }
