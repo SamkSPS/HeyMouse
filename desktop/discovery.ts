@@ -23,12 +23,14 @@ export interface Announcement {
   inputPort: number;
   fingerprint: string;
   engineFingerprint?: string;
+  inviteProof?: string;
   engineAvailable: boolean;
   role: Device['role'];
   publicKey: string;
 }
 
 export interface DiscoveredDevice extends Device {
+  inviteProof?: string;
   publicKey: string;
 }
 
@@ -77,6 +79,7 @@ function parseAnnouncement(value: unknown): Announcement | null {
     typeof a.engineAvailable !== 'boolean' || !['server', 'client'].includes(a.role as string) ||
     typeof a.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(a.fingerprint) ||
     typeof a.publicKey !== 'string' || a.publicKey.length > 512 ||
+    (a.inviteProof !== undefined && (typeof a.inviteProof !== 'string' || !/^[a-f0-9]{64}$/.test(a.inviteProof))) ||
     (a.engineFingerprint !== undefined && (typeof a.engineFingerprint !== 'string' || !/^(?:[a-fA-F0-9]{64}|(?:[a-fA-F0-9]{2}:){31}[a-fA-F0-9]{2})$/.test(a.engineFingerprint)))
   ) return null;
   try {
@@ -91,6 +94,7 @@ function parseAnnouncement(value: unknown): Announcement | null {
     platform: a.platform as Announcement['platform'], controlPort: a.controlPort,
     inputPort: a.inputPort, fingerprint: a.fingerprint,
     engineFingerprint: a.engineFingerprint as string | undefined,
+    ...(typeof a.inviteProof === 'string' ? { inviteProof: a.inviteProof } : {}),
     engineAvailable: a.engineAvailable, role: a.role as Announcement['role'], publicKey: a.publicKey,
   };
 }
@@ -222,6 +226,11 @@ export class Discovery extends EventEmitter {
     this.peers.clear();
     this.replay.clear();
     this.emit('status', { active: false, error: null });
+  }
+
+  devices(): DiscoveredDevice[] {
+    this.expire();
+    return [...this.peers.values()].map(peer => peer.device);
   }
 
   refresh(): void {

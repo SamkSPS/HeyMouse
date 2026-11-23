@@ -1,10 +1,11 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, request, Agent, type Server } from 'node:https';
 import { connect, type TLSSocket } from 'node:tls';
 import { isIP } from 'node:net';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Device, PairInvite } from '../shared/types';
 import { certificateFingerprint, fingerprint, identityId, signPayload, verifyPayload, type Identity } from './identity';
+import type { DiscoveredDevice } from './discovery';
 import type { TrustedPeer } from './store';
 
 interface PublicIdentity { device: Device; publicKey: string; tlsFingerprint: string }
@@ -14,6 +15,7 @@ interface Invite { v: 1; id: string; publicKey: string; tlsFingerprint: string; 
 interface ControlOptions {
   identity: Identity;
   getDevice: () => Device;
+  getDiscovered: () => DiscoveredDevice[];
   getPeer: (id: string) => TrustedPeer | undefined;
   onPair: (peer: TrustedPeer) => Promise<void>;
   allowLoopback?: boolean;
@@ -25,6 +27,11 @@ export function isLanAddress(address: string, allowLoopback = false): boolean {
     (parts[0] === 192 && parts[1] === 168) || (parts[0] === 169 && parts[1] === 254) || (allowLoopback && parts[0] === 127);
 }
 function hash(input: string | Buffer) { return createHash('sha256').update(input).digest('hex'); }
+const CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+function pairingProof(code: string, pin: string, purpose: 'discovery' | 'pair') {
+  return createHmac('sha256', code).update(`heymouse-v2:${purpose}:${pin}`).digest('hex');
+}
+
 function validateIdentity(value: PublicIdentity): void {
   if (!value || typeof value.publicKey !== 'string' || value.publicKey.length > 1024) throw new Error('Identidade inválida.');
   const d = value.device;
@@ -92,7 +99,7 @@ export async function pinnedRequest(host: string, port: number, pin: string, pat
 
 export class ControlServer {
   private server: Server | null = null;
-  private invite: { tokenHash: string; expiresAt: number } | null = null;
+  private invite: { tokenHash: string; expiresAt: number; proof: string } | null = null;
   private seen = new Map<string, number>();
   private attempts = new Map<string, { count: number; since: number }>();
   private sockets = new Set<TLSSocket>();
@@ -131,14 +138,37 @@ export class ControlServer {
     for (const socket of this.sockets) socket.destroy();
     if (server) await new Promise<void>(resolve => server.close(() => resolve()));
   }
+  inviteProof(): string | undefined {
+    return this.invite && this.invite.expiresAt > Date.now() ? this.invite.proof : undefined;
+  }
   createInvite(): PairInvite {
     const local = this.publicIdentity();
-    const addresses = local.device.addresses.filter(ip => isLanAddress(ip, this.options.allowLoopback));
-    if (!this.server || !addresses.length) throw new Error('Conecte este computador à rede local antes de criar um convite.');
-    const token = randomBytes(32).toString('hex'), expiresAt = Date.now() + 5 * 60_000;
-    this.invite = { tokenHash: hash(token), expiresAt };
-    const invite: Invite = { v: 1, id: local.device.id, publicKey: local.publicKey, tlsFingerprint: local.tlsFingerprint, addresses, port: this.port, token, expiresAt };
-    return { code: 'HM1.' + Buffer.from(JSON.stringify(invite)).toString('base64url'), expiresAt };
+    if (!this.server || !local.device.addresses.some(ip => isLanAddress(ip, this.options.allowLoopback))) {
+      throw new Error('Conecte este computador à rede local antes de gerar um código.');
+    }
+    const code = Array.from(randomBytes(12), byte => CODE_ALPHABET[byte & 31]).join('');
+    const expiresAt = Date.now() + 5 * 60_000;
+    this.invite = {
+      tokenHash: hash(pairingProof(code, local.tlsFingerprint, 'pair')),
+      proof: pairingProof(code, local.tlsFingerprint, 'discovery'),
+      expiresAt,
+    };
+    return { code: `${code.slice(0, 4)}-${code.slice(4, 8)}-${code.slice(8)}`, expiresAt };
+  }
+  private resolveCode(code: string): Invite {
+    const normalized = code.toUpperCase().replace(/[\s-]/g, '');
+    if (!/^[2-9A-HJ-NP-Z]{12}$/.test(normalized)) throw new Error('Digite os 12 caracteres do código de pareamento.');
+    for (const device of this.options.getDiscovered()) {
+      const pin = device.engineFingerprint?.replace(/:/g, '').toLowerCase();
+      if (!pin || device.inviteProof !== pairingProof(normalized, pin, 'discovery')) continue;
+      const addresses = device.addresses.filter(ip => isLanAddress(ip, this.options.allowLoopback));
+      if (!addresses.length) continue;
+      return {
+        v: 1, id: device.id, publicKey: device.publicKey, tlsFingerprint: pin, addresses,
+        port: device.controlPort, token: pairingProof(normalized, pin, 'pair'), expiresAt: 0,
+      };
+    }
+    throw new Error('Código não encontrado. Confira o código, a descoberta automática e se os dois aparelhos estão na mesma rede.');
   }
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const reply = (status: number, body: unknown) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); } };
@@ -177,7 +207,8 @@ export class ControlServer {
     } catch (error) { reply(403, { error: error instanceof Error ? error.message : 'Falha na autenticação.' }); }
   }
   async pair(code: string): Promise<TrustedPeer> {
-    const invite = parseInvite(code, this.options.allowLoopback);
+    if (typeof code !== 'string' || code.length > 12000) throw new Error('Código de pareamento inválido.');
+    const invite = code.trim().startsWith('HM1.') ? parseInvite(code, this.options.allowLoopback) : this.resolveCode(code);
     if (invite.id === this.options.getDevice().id) throw new Error('Cole este convite no outro computador.');
     const nonce = randomBytes(16).toString('hex');
     const envelope = this.envelope(invite.id, nonce, invite.token);

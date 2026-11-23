@@ -90,13 +90,13 @@ function onDiscovered(device: DiscoveredDevice) {
       notice(`A identidade de ${peer.device.name} mudou. Refaça o pareamento nesse computador.`); return;
     }
     const changed = peer.device.addresses[0] !== device.addresses[0] || peer.device.inputPort !== device.inputPort || peer.device.controlPort !== device.controlPort;
-    const { publicKey: _key, ...publicDevice } = device;
+    const { publicKey: _key, inviteProof: _proof, ...publicDevice } = device;
     peer.device = { ...publicDevice, paired: true, engineFingerprint: peer.tlsFingerprint };
     if (changed) {
       void persist().catch(error => notice(error.message));
       if (store.state.settings.engine.role === 'client' && store.state.settings.engine.serverDeviceId === device.id) scheduleRestart();
     }
-  } else { const { publicKey: _key, ...publicDevice } = device; discovered.set(device.id, publicDevice); }
+  } else { const { publicKey: _key, inviteProof: _proof, ...publicDevice } = device; discovered.set(device.id, publicDevice); }
   publish();
 }
 async function pollPeers() {
@@ -151,7 +151,12 @@ function registerIpc() {
     await persist(); scheduleRestart(); return state();
   });
   bind('refresh', async () => { discovery.refresh(); await pollPeers(); });
-  bind('invite', () => control.createInvite());
+  bind('invite', () => {
+    if (!discoveryStatus.active) throw new Error('Ative a descoberta automática em Configurações antes de gerar um código.');
+    const invite = control.createInvite();
+    discovery.refresh();
+    return invite;
+  });
   bind('pair', async (code: string) => { await control.pair(code); return state(); });
   bind('forget', async (id: string) => {
     if (typeof id !== 'string') throw new Error('Dispositivo inválido.');
@@ -215,10 +220,10 @@ async function boot() {
   store = new Store(app.getPath('userData'), localId); await store.load();
   store.state.settings.engine.screenName = engineScreenName(localId);
   engine = new EngineManager({ dataDir: app.getPath('userData'), resourcesDir: app.isPackaged ? join(process.resourcesPath, 'engine') : join(app.getAppPath(), 'resources/engine'), onStatus: publish, onLog: publish });
-  control = new ControlServer({ identity, getDevice: localDevice, getPeer: id => store.state.peers.find(p => p.device.id === id), onPair: paired });
+  control = new ControlServer({ identity, getDevice: localDevice, getDiscovered: () => discovery?.devices() ?? [], getPeer: id => store.state.peers.find(p => p.device.id === id), onPair: paired });
   try { await control.start(); } catch (error) { notice(`Pareamento indisponível: ${(error as Error).message}`); }
   engineAvailable = (await engine.detect(store.state.settings.engine.executablePath)).available;
-  discovery = new Discovery({ getAnnouncement: () => ({ ...localDevice(), publicKey: identity.publicKey }), sign: payload => signPayload(payload, identity.privateKey), verify: verifyPayload });
+  discovery = new Discovery({ getAnnouncement: () => ({ ...localDevice(), publicKey: identity.publicKey, inviteProof: control.inviteProof() }), sign: payload => signPayload(payload, identity.privateKey), verify: verifyPayload });
   discovery.on('device', onDiscovered);
   discovery.on('status', status => { discoveryStatus = status; publish(); });
   discovery.on('offline', (id: string) => { const peer = store.state.peers.find(p => p.device.id === id); if (peer && Date.now() - peer.device.lastSeen > 14000) peer.device.online = false; discovered.delete(id); delete latency[id]; publish(); });
