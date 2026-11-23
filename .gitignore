@@ -1,0 +1,10 @@
+node_modules/
+dist/
+dist-desktop/
+release/
+resources/engine/
+.tmp/
+.cache/
+*.log
+.env
+.DS_Store
