@@ -8,11 +8,13 @@ using System.Windows.Forms;
 // Keep the OLE target hittable during the press, but only highlight a file hover.
 sealed class EdgeFileDrop : Form
 {
-    const double IdleOpacity = 0.01;
+    const double IdleOpacity = 1.0 / 255;
     readonly Timer timer = new Timer { Interval = 35 };
     readonly JavaScriptSerializer json = new JavaScriptSerializer();
     readonly string edge;
     DateTime hideAfter;
+    Point? pressStart;
+    bool dragging;
 
     EdgeFileDrop(string edge)
     {
@@ -46,10 +48,15 @@ sealed class EdgeFileDrop : Form
         bool held = (GetAsyncKeyState(0x01) & 0x8000) != 0;
         if (held)
         {
+            Point cursor = Cursor.Position;
+            if (!pressStart.HasValue) pressStart = cursor;
+            Size threshold = SystemInformation.DragSize;
+            dragging |= Math.Abs(cursor.X - pressStart.Value.X) >= Math.Max(2, threshold.Width / 2) ||
+                        Math.Abs(cursor.Y - pressStart.Value.Y) >= Math.Max(2, threshold.Height / 2);
             hideAfter = DateTime.UtcNow.AddMilliseconds(160);
-            if (!Visible)
+            Rectangle display = Screen.FromPoint(cursor).Bounds;
+            if (dragging && !Visible && IsNearEdge(cursor, display))
             {
-                Rectangle display = Screen.FromPoint(Cursor.Position).Bounds;
                 const int thickness = 12;
                 switch (edge)
                 {
@@ -62,9 +69,23 @@ sealed class EdgeFileDrop : Form
                 Show();
             }
         }
-        else if (Visible && DateTime.UtcNow >= hideAfter)
+        else
         {
-            Hide();
+            pressStart = null;
+            dragging = false;
+            if (Visible && DateTime.UtcNow >= hideAfter) Hide();
+        }
+    }
+
+    bool IsNearEdge(Point cursor, Rectangle display)
+    {
+        const int activationDistance = 28;
+        switch (edge)
+        {
+            case "left": return cursor.X - display.Left < activationDistance;
+            case "right": return display.Right - 1 - cursor.X < activationDistance;
+            case "top": return cursor.Y - display.Top < activationDistance;
+            default: return display.Bottom - 1 - cursor.Y < activationDistance;
         }
     }
 
