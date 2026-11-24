@@ -79,6 +79,9 @@ test('six-digit pairing persists trust only after the host confirms', async () =
     const target = joiner.peers.get(host.getDevice().id)!;
     const file = { name: 'original.bin', size: bytes.length };
     await assert.rejects(joiner.control.sendFile(target, source, file, () => {}), /recusada/);
+    // An offer above the former cap reaches the receiver's decision without
+    // writing gigabytes to disk. A declined offer never starts the upload.
+    await assert.rejects(joiner.control.sendFile(target, source, { name: 'large.zip', size: 5 * 1024 ** 3 }, () => {}), /recusada/);
     destination = join(directory, 'received.bin');
     await joiner.control.sendFile(target, source, file, () => {});
     assert.deepEqual(await readFile(destination), bytes);

@@ -17,7 +17,6 @@ interface PublicIdentity { device: Device; publicKey: string; tlsFingerprint: st
 interface Envelope { payload: string; signature: string }
 interface Payload extends PublicIdentity { timestamp: number; nonce: string; recipient: string; token?: string; file?: FileOffer }
 export interface FileOffer { name: string; size: number }
-const MAX_FILE_BYTES = 2 * 1024 ** 3;
 interface PairTarget { id: string; publicKey: string; tlsFingerprint: string; addresses: string[]; port: number; token: string }
 interface ControlOptions {
   identity: Identity;
@@ -242,7 +241,7 @@ export class ControlServer {
           const file = payload.file;
           if (!file || typeof file.name !== 'string' || !file.name || file.name.length > 255 ||
               /[\\/\x00-\x1f]/.test(file.name) || ['.', '..'].includes(file.name) ||
-              !Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_FILE_BYTES) throw new Error('Arquivo inválido ou acima de 2 GB.');
+              !Number.isSafeInteger(file.size) || file.size < 0) throw new Error('Arquivo inválido.');
           if (!this.options.acceptFile) throw new Error('O recebimento está indisponível.');
           if (this.decidingFile || this.receivingFile || (this.incomingFile && this.incomingFile.expires > Date.now())) throw new Error('Já existe uma transferência em andamento.');
           this.decidingFile = true;
@@ -292,7 +291,7 @@ export class ControlServer {
     }
   }
   async sendFile(peer: TrustedPeer, source: string, file: FileOffer, onProgress: (sent: number) => void): Promise<void> {
-    if (file.size > MAX_FILE_BYTES) throw new Error('O limite por arquivo é de 2 GB.');
+    if (!Number.isSafeInteger(file.size) || file.size < 0) throw new Error('Tamanho de arquivo inválido.');
     const address = peer.device.addresses.find(ip => isLanAddress(ip, this.options.allowLoopback));
     if (!address) throw new Error('O aparelho está sem endereço na rede local.');
     const { id, controlPort } = peer.device;
