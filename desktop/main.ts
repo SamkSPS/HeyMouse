@@ -128,7 +128,8 @@ async function sendFile(id: string, droppedPath?: string): Promise<boolean> {
 }
 function engineOptions() {
   return { settings: store.state.settings.engine, localDeviceId: localId, devices: store.state.peers.map(p => p.device),
-    layout: store.state.layout, certificatePem: identity.tlsKey + '\n' + identity.certificate, clipboardSharing: false };
+    layout: store.state.layout, certificatePem: identity.tlsKey + '\n' + identity.certificate,
+    clipboardSharing: store.state.settings.clipboardSharing, macControlAsCommand: store.state.settings.macControlAsCommand };
 }
 async function startSharing() {
   if (store.state.settings.engine.role === 'client') {
@@ -202,7 +203,8 @@ function registerIpc() {
     const current = store.state.settings;
     const next = validateSettings(current, patch);
     if (next.engine.serverDeviceId && !store.state.peers.some(p => p.device.id === next.engine.serverDeviceId)) throw new Error('Selecione um computador pareado.');
-    const engineChanged = JSON.stringify(current.engine) !== JSON.stringify(next.engine);
+    const engineChanged = JSON.stringify(current.engine) !== JSON.stringify(next.engine) ||
+      current.clipboardSharing !== next.clipboardSharing || current.macControlAsCommand !== next.macControlAsCommand;
     store.state.settings = next;
     if (current.discoveryEnabled !== next.discoveryEnabled) {
       if (next.discoveryEnabled) await discovery.start().catch(error => notice(error.message)); else discovery.stop();

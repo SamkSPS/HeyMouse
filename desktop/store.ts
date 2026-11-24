@@ -14,6 +14,7 @@ export class Store {
     this.state = { version: 1, settings: {
       deviceName: hostname(), engine: { executablePath: '', role: 'server', port: 24800, screenName: localId, serverDeviceId: null, autoStart: false },
       startMinimized: false, closeToTray: true, discoveryEnabled: true,
+      clipboardSharing: false, macControlAsCommand: false,
     }, peers: [], layout: [{ deviceId: localId, x: 0, y: 0 }] };
   }
   async load(): Promise<void> {
@@ -89,7 +90,7 @@ function validateTrustedPeer(value: unknown): TrustedPeer {
 export function validateSettings(current: Settings, patch: Partial<Settings>): Settings {
   if (!isRecord(patch) || (Object.hasOwn(patch, 'engine') && !isRecord(patch.engine))) throw new Error('Preferências inválidas.');
   const settings = {
-    ...current, ...pick<Settings>(patch, ['deviceName', 'startMinimized', 'closeToTray', 'discoveryEnabled']),
+    ...current, ...pick<Settings>(patch, ['deviceName', 'startMinimized', 'closeToTray', 'discoveryEnabled', 'clipboardSharing', 'macControlAsCommand']),
     engine: { ...current.engine, ...pick<Settings['engine']>((patch.engine ?? {}) as Record<string, unknown>, ['executablePath', 'role', 'port', 'serverDeviceId', 'autoStart']) },
   };
   if (typeof settings.deviceName !== 'string' || !settings.deviceName.trim() || settings.deviceName.length > 64 || /[\r\n\x00-\x1f\x7f]/.test(settings.deviceName)) throw new Error('Use um nome com 1 a 64 caracteres.');
@@ -99,7 +100,7 @@ export function validateSettings(current: Settings, patch: Partial<Settings>): S
   if (!Number.isInteger(engine.port) || engine.port < 1024 || engine.port > 65535) throw new Error('A porta deve estar entre 1024 e 65535.');
   if (typeof engine.executablePath !== 'string' || engine.executablePath.length > 4096 || engine.executablePath.includes('\0')) throw new Error('Caminho inválido.');
   if (engine.serverDeviceId !== null && (typeof engine.serverDeviceId !== 'string' || !/^[a-f0-9]{32}$/.test(engine.serverDeviceId))) throw new Error('Servidor inválido.');
-  for (const value of [settings.startMinimized, settings.closeToTray, settings.discoveryEnabled, engine.autoStart]) if (typeof value !== 'boolean') throw new Error('Preferência inválida.');
+  for (const value of [settings.startMinimized, settings.closeToTray, settings.discoveryEnabled, settings.clipboardSharing, settings.macControlAsCommand, engine.autoStart]) if (typeof value !== 'boolean') throw new Error('Preferência inválida.');
   engine.screenName = current.engine.screenName;
   return settings;
 }

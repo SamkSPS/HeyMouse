@@ -25,6 +25,10 @@ Os aparelhos pareados mantêm sua identidade quando o endereço IP muda. A desco
 
 Se o Deskflow já estiver rodando, encerre-o normalmente antes de iniciar o compartilhamento pelo HeyMouse. A medição em milissegundos na interface representa o tempo de resposta do canal de controle. A latência do mouse e teclado precisa ser medida separadamente.
 
+## Copiar e colar
+
+No servidor, abra **Configurações → Copiar e colar** e ative **Compartilhar área de transferência**. Copie o texto, passe o cursor para o outro computador e cole com o atalho daquela tela. No Windows, use Ctrl+C e Ctrl+V. No Mac, use ⌘C e ⌘V. Se preferir usar Ctrl no teclado do Windows para controlar o Mac, ative **Usar Ctrl como ⌘ nos Macs receptores**. Isso troca os dois modificadores no Mac remoto e afeta também os outros atalhos.
+
 ## Enviar arquivos
 
 Na aba **Conexões**, arraste um arquivo do Explorer ou Finder até o cartão do computador de destino. Também é possível abrir os detalhes do aparelho e clicar em **Enviar arquivo**. No destino, escolha onde salvar e clique em **Aceitar e salvar**.

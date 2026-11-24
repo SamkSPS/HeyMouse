@@ -11,6 +11,7 @@ export interface EngineSettings {
 export interface Settings {
   deviceName: string; engine: EngineSettings; startMinimized: boolean;
   closeToTray: boolean; discoveryEnabled: boolean;
+  clipboardSharing: boolean; macControlAsCommand: boolean;
 }
 export interface ScreenPlacement { deviceId: string; x: number; y: number }
 export interface EngineStatus {

@@ -18,6 +18,7 @@ export interface EngineStartOptions {
   /** Private key and certificate in PEM format. Never expose this to the renderer. */
   certificatePem: string;
   clipboardSharing?: boolean;
+  macControlAsCommand?: boolean;
 }
 export interface EngineDetection {
   available: boolean;
@@ -125,12 +126,17 @@ export function createEngineConfig(options: EngineStartOptions, configDir: strin
     '[log]', 'level=INFO', 'toFile=false', '',
     '[client]', `remoteHost=${ini(remoteHost)}`, 'dynamicConnectionInterval=false', 'languageSync=false', '',
     '[server]', 'externalConfig=true', `externalConfigFile=${ini(linksPath)}`, 'protocol=barrier',
-    `enableClipboard=${options.clipboardSharing === true}`, 'enableHeartbeat=true', 'heartbeat=1000',
+    `enableClipboard=${options.clipboardSharing === true}`, 'clipboardSize=4', 'enableHeartbeat=true', 'heartbeat=1000',
     'enableSwitchDelay=false', 'enableSwitchDoubleTap=false', 'relativeMouseMoves=false', '',
   ];
   for (const screen of placements) {
     const name = engineScreenName(screen.deviceId);
-    sections.push(`[computer_${name}]`, `name=${name}`, 'switchCornerSize=0', '');
+    sections.push(`[computer_${name}]`, `name=${name}`, 'switchCornerSize=0');
+    if (settings.role === 'server' && options.macControlAsCommand &&
+        paired.some(peer => peer.id === screen.deviceId && peer.platform === 'darwin')) {
+      sections.push('modifierCtrl=super', 'modifierSuper=ctrl');
+    }
+    sections.push('');
   }
   return { settingsText: sections.join('\n'), linksText: linkLines.join('\n'), trust,
     settingsPath: path.join(configDir, 'Deskflow.conf'), linksPath, certificatePath };
