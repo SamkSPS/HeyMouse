@@ -20,7 +20,7 @@
   "build": {
     "appId": "app.heymouse.desktop",
     "productName": "HeyMouse",
-    "asarUnpack": ["dist-desktop/edge-drop.exe"],
+    "asarUnpack": ["dist-desktop/edge-drop.exe", "dist-desktop/edge-drop"],
     "directories": {
       "output": "release"
     },

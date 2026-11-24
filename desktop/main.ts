@@ -290,10 +290,11 @@ async function boot() {
   store = new Store(app.getPath('userData'), localId); await store.load();
   store.state.settings.engine.screenName = engineScreenName(localId);
   engine = new EngineManager({ dataDir: app.getPath('userData'), resourcesDir: app.isPackaged ? join(process.resourcesPath, 'engine') : join(app.getAppPath(), 'resources/engine'), onStatus: publish, onLog: publish });
-  if (process.platform === 'win32') {
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    const binary = process.platform === 'win32' ? 'edge-drop.exe' : 'edge-drop';
     const executable = app.isPackaged
-      ? join(process.resourcesPath, 'app.asar.unpacked', 'dist-desktop', 'edge-drop.exe')
-      : join(__dirname, 'edge-drop.exe');
+      ? join(process.resourcesPath, 'app.asar.unpacked', 'dist-desktop', binary)
+      : join(__dirname, binary);
     const feedback = (text: string) => {
       if (window && !window.isDestroyed()) window.webContents.send('heymouse:file-feedback', text);
     };

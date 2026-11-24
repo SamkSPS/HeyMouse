@@ -35,11 +35,11 @@ Na aba **Conexões**, arraste um arquivo do Explorer ou Finder até o cartão do
 
 O envio funciona nos dois sentidos entre aparelhos pareados, pela rede local. Envie um arquivo por vez, de qualquer extensão. Para enviar uma pasta, compacte-a primeiro. O HeyMouse não impõe um limite em GB. O destino precisa ter espaço livre e aceitar arquivos desse tamanho.
 
-No Windows, com o compartilhamento iniciado, você também pode soltar o arquivo na faixa da borda que corresponde ao outro computador no mapa. Se o Mac estiver à esquerda, use a faixa esquerda. Ela fica verde quando você aproxima um arquivo. O Mac abre o mesmo diálogo de recebimento do envio pelo cartão.
+No Windows e no Mac, com o compartilhamento iniciado, você também pode soltar o arquivo na faixa da borda que corresponde ao outro computador no mapa local. Se o destino estiver à esquerda, use a faixa esquerda. Ela fica verde quando você aproxima um arquivo. O destino abre o mesmo diálogo de recebimento do envio pelo cartão.
 
 ## macOS
 
-No Mac, com Node.js 24 instalado, execute na pasta do projeto:
+No Mac, com Node.js 24 e as ferramentas de linha de comando do Xcode instaladas, execute na pasta do projeto:
 
 ```sh
 npm ci

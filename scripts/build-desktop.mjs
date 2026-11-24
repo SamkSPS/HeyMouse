@@ -8,4 +8,6 @@ if (process.platform === 'win32') {
   execFileSync(csc, ['/nologo', '/target:exe', '/out:' + resolve('dist-desktop/edge-drop.exe'),
     '/reference:System.Drawing.dll', '/reference:System.Windows.Forms.dll', '/reference:System.Web.Extensions.dll',
     resolve('native/windows/EdgeFileDrop.cs')], { stdio: 'inherit', windowsHide: true });
+} else if (process.platform === 'darwin') {
+  execFileSync('xcrun', ['swiftc', 'native/macos/EdgeFileDrop.swift', '-o', 'dist-desktop/edge-drop'], { stdio: 'inherit' });
 }
