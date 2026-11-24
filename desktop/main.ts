@@ -1,6 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, shell, Tray, type IpcMainInvokeEvent } from 'electron';
-import { basename, isAbsolute, join } from 'node:path';
-import { stat } from 'node:fs/promises';
+import { basename, extname, isAbsolute, join } from 'node:path';
+import { lstat, stat } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import type { AppState, Device, Settings, ScreenPlacement } from '../shared/types';
@@ -9,6 +9,7 @@ import { Store, validateLayout, validateSettings, type TrustedPeer } from './sto
 import { Discovery, ipv4Interfaces, type DiscoveredDevice } from './discovery';
 import { ControlServer, type FileOffer } from './control';
 import { EdgeFileDrop, edgeTargets } from './edge-file-drop';
+import { offeredFileName, withOriginalExtension } from './received-file-name';
 import { EngineManager, engineScreenName } from './engine';
 
 app.setName('HeyMouse');
@@ -85,19 +86,37 @@ async function confirmPair(device: Device, signal: AbortSignal): Promise<boolean
 }
 async function acceptFile(device: Device, file: FileOffer): Promise<string | undefined> {
   if (closing) return;
-  if (!window) await createWindow();
-  if (!window || closing) return;
-  window.show();
-  window.focus();
-  const name = file.name.replace(/[<>:"|?*]/g, '_').replace(/[. ]+$/, '') || 'arquivo';
+  const name = offeredFileName(file.name);
+  const extension = extname(name).slice(1);
   const size = new Intl.NumberFormat('pt-BR').format(file.size);
-  const result = await dialog.showSaveDialog(window, {
+  const result = await dialog.showSaveDialog({
     title: `Receber de ${device.name}`,
     message: `${device.name} quer enviar ${file.name} (${size} bytes).`,
     defaultPath: join(app.getPath('downloads'), name),
     buttonLabel: 'Aceitar e salvar',
+    filters: process.platform === 'win32' && /^[\p{L}\p{N}_+-]{1,32}$/u.test(extension)
+      ? [{ name: `Arquivo .${extension}`, extensions: [extension] }, { name: 'Todos os arquivos', extensions: ['*'] }]
+      : undefined,
   });
-  return result.canceled || closing ? undefined : result.filePath;
+  if (result.canceled || closing || !result.filePath) return;
+  const destination = withOriginalExtension(result.filePath, name);
+  // The save dialog already handles overwrite protection for its own path.
+  // If we supplied a missing suffix, confirm separately for the actual path.
+  if (destination !== result.filePath) {
+    const exists = await lstat(destination).then(() => true, error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    });
+    if (exists) {
+      const confirmation = await dialog.showMessageBox({
+        type: 'warning', title: 'Substituir arquivo?',
+        message: `Já existe um arquivo chamado ${basename(destination)} nesta pasta.`,
+        buttons: ['Cancelar', 'Substituir'], defaultId: 0, cancelId: 0,
+      });
+      if (confirmation.response !== 1 || closing) return;
+    }
+  }
+  return closing ? undefined : destination;
 }
 async function sendFile(id: string, droppedPath?: string): Promise<boolean> {
   const peer = store.state.peers.find(item => item.device.id === id && item.device.online);
@@ -256,9 +275,10 @@ function registerIpc() {
     await shell.openExternal(parsed.href);
   });
 }
-async function createWindow() {
+async function createWindow(showOnReady = !store.state.settings.startMinimized) {
   window = new BrowserWindow({ width: 1280, height: 850, minWidth: 1000, minHeight: 700, show: false,
     title: 'HeyMouse', backgroundColor: '#101114', autoHideMenuBar: true,
+    skipTaskbar: process.platform === 'win32' && !!tray,
     icon: join(__dirname, '../dist/icon.png'),
     webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true },
   });
@@ -268,10 +288,16 @@ async function createWindow() {
   window.on('close', event => { if (!closing && store.state.settings.closeToTray && tray) { event.preventDefault(); window?.hide(); } });
   window.on('closed', () => { window = null; });
   window.once('ready-to-show', () => {
-    window?.show();
-    if (store.state.settings.startMinimized) window?.minimize();
+    if (showOnReady) window?.show();
+    else if (!tray) { window?.show(); window?.minimize(); }
   });
   if (devUrl) await window.loadURL(devUrl); else await window.loadFile(rendererFile);
+}
+async function openMainWindow() {
+  if (!window) { await createWindow(true); return; }
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
 }
 function createTray() {
   const icon = nativeImage.createFromPath(join(__dirname, '../dist/icon.png')).resize({ width: 20, height: 20 });
@@ -279,11 +305,12 @@ function createTray() {
   tray = new Tray(icon);
   tray.setToolTip('HeyMouse');
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Abrir HeyMouse', click: () => window?.show() },
+    { label: 'Abrir HeyMouse', click: () => { void openMainWindow().catch(error => notice(error.message)); } },
     { label: 'Pausar compartilhamento', click: () => { sharingWanted = false; void enqueue(() => engine.stop()).catch(error => notice(error.message)); } },
     { type: 'separator' }, { label: 'Sair', click: () => app.quit() },
   ]));
-  tray.on('double-click', () => window?.show());
+  tray.on('double-click', () => { void openMainWindow().catch(error => notice(error.message)); });
+  if (process.platform === 'darwin') void app.dock?.hide();
 }
 async function boot() {
   identity = await loadIdentity(app.getPath('userData')); localId = identityId(identity.publicKey);
@@ -314,13 +341,13 @@ async function boot() {
   discovery.on('device', onDiscovered);
   discovery.on('status', status => { discoveryStatus = status; publish(); });
   discovery.on('offline', (id: string) => { const peer = store.state.peers.find(p => p.device.id === id); if (peer && Date.now() - peer.device.lastSeen > 14000) peer.device.online = false; discovered.delete(id); delete latency[id]; publish(); });
-  registerIpc(); await createWindow(); createTray();
+  registerIpc(); createTray(); await createWindow();
   if (store.state.settings.discoveryEnabled) await discovery.start().catch(error => notice(error.message));
   pollTimer = setInterval(() => { void pollPeers(); }, 5000); void pollPeers();
   if (store.state.settings.engine.autoStart) await startSharing().catch(error => notice(error.message));
 }
-app.on('second-instance', () => { window?.show(); window?.focus(); });
-app.on('activate', () => { if (window) window.show(); else if (store) void createWindow(); });
+app.on('second-instance', () => { if (window || tray) void openMainWindow().catch(error => notice(error.message)); });
+app.on('activate', () => { if (window || tray) void openMainWindow().catch(error => notice(error.message)); });
 app.on('window-all-closed', () => { if (!tray) app.quit(); });
 app.on('before-quit', event => {
   if (closing) return; event.preventDefault(); closing = true; sharingWanted = false;
