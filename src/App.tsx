@@ -185,6 +185,7 @@ export default function App() {
   useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
   const run = useCallback(async (action: () => Promise<unknown>) => { try { await action(); } catch (error) { showError(errorText(error)); } }, [showError]);
   useEffect(() => bridge?.onFileReceived(name => showError(`Arquivo recebido: ${name}`)), [showError]);
+  useEffect(() => bridge?.onFileFeedback(showError), [showError]);
   const send = (device: Device, file?: File) => void run(async () => {
     const sent = file ? await bridge!.sendDroppedFile(device.id, file) : await bridge!.sendFile(device.id);
     if (sent) showError(`Arquivo salvo em ${device.name}.`);

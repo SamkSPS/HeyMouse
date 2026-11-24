@@ -42,4 +42,5 @@ export interface HeyMouseBridge {
   sendFile(deviceId: string): Promise<boolean>;
   sendDroppedFile(deviceId: string, file: File): Promise<boolean>;
   onFileReceived(listener: (name: string) => void): () => void;
+  onFileFeedback(listener: (message: string) => void): () => void;
 }

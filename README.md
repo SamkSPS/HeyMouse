@@ -33,7 +33,9 @@ No servidor, abra **Configurações → Copiar e colar** e ative **Compartilhar 
 
 Na aba **Conexões**, arraste um arquivo do Explorer ou Finder até o cartão do computador de destino. Também é possível abrir os detalhes do aparelho e clicar em **Enviar arquivo**. No destino, escolha onde salvar e clique em **Aceitar e salvar**.
 
-O envio funciona nos dois sentidos entre aparelhos pareados, pela rede local. O limite é de um arquivo de até 2 GB por envio. O gesto de soltar acontece dentro do mapa de telas do HeyMouse.
+O envio funciona nos dois sentidos entre aparelhos pareados, pela rede local. O limite é de um arquivo de até 2 GB por envio.
+
+No Windows, com o compartilhamento iniciado, você também pode soltar o arquivo na faixa da borda que corresponde ao outro computador no mapa. Se o Mac estiver à esquerda, use a faixa esquerda. O Mac abre o mesmo diálogo de recebimento do envio pelo cartão. A faixa só aparece enquanto o botão esquerdo está pressionado.
 
 ## macOS
 

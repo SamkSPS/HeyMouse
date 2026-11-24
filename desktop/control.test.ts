@@ -7,14 +7,10 @@ import type { TrustedPeer } from './store';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import type { DragEvent } from '../native/drag-handoff';
 
 test('six-digit pairing persists trust only after the host confirms', async () => {
   let respond: ((approved: boolean) => void) | undefined;
   let destination: string | undefined;
-  let dragSession: string | undefined;
-  const receivedEvents: DragEvent[] = [];
   const directory = await mkdtemp(join(tmpdir(), 'heymouse-transfer-'));
   const makeDevice = async (name: string) => {
     const identity = await createIdentity();
@@ -33,7 +29,6 @@ test('six-digit pairing persists trust only after the host confirms', async () =
       onPair: async peer => { peers.set(peer.device.id, peer); },
       confirmPair: async () => new Promise<boolean>(resolve => { respond = resolve; }),
       acceptFile: async () => destination,
-      openDrag: (_peer, sessionId) => sessionId === dragSession ? event => { receivedEvents.push(event); } : undefined,
     });
     return { control, identity, peers, discovered, getDevice };
   };
@@ -87,15 +82,6 @@ test('six-digit pairing persists trust only after the host confirms', async () =
     destination = join(directory, 'received.bin');
     await joiner.control.sendFile(target, source, file, () => {});
     assert.deepEqual(await readFile(destination), bytes);
-    async function* dragEvents(): AsyncGenerator<DragEvent> {
-      yield { type: 'file-drag-move', dx: 4, dy: -3 };
-      yield { type: 'file-drag-released' };
-    }
-    await assert.rejects(joiner.control.forwardDrag(target, randomUUID(), dragEvents()), /não aceitou/);
-    assert.deepEqual(receivedEvents, []);
-    dragSession = randomUUID();
-    await joiner.control.forwardDrag(target, dragSession, dragEvents());
-    assert.deepEqual(receivedEvents, [{ type: 'file-drag-move', dx: 4, dy: -3 }, { type: 'file-drag-released' }]);
   } finally {
     await Promise.all([host.control.stop(), joiner.control.stop()]);
     await rm(directory, { recursive: true, force: true });

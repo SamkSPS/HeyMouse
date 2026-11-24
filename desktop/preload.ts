@@ -25,5 +25,10 @@ const api: HeyMouseBridge = {
     ipcRenderer.on('heymouse:file-received', handler);
     return () => ipcRenderer.removeListener('heymouse:file-received', handler);
   },
+  onFileFeedback: listener => {
+    const handler = (_event: unknown, message: string) => listener(message);
+    ipcRenderer.on('heymouse:file-feedback', handler);
+    return () => ipcRenderer.removeListener('heymouse:file-feedback', handler);
+  },
 };
 contextBridge.exposeInMainWorld('heymouse', api);
