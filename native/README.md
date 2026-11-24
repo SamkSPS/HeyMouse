@@ -23,4 +23,30 @@ xcrun swiftc native/macos/EdgeDragProbe.swift -o .tmp/edge-drag/MacEdgeDragProbe
 
 No Windows, execute `scripts/build-edge-drag-probe.ps1`. Rode `.tmp/edge-drag/ExplorerDragProbe.exe "C:\caminho\arquivo.txt"` e arraste a área de texto da janela para outra pasta aberta no Explorer. Confira se a cópia aparece lá. Use um arquivo pequeno que já esteja no Windows.
 
-A integração pendente é transferir o controle do gesto do sistema de origem para a sessão de arraste no destino. Ela precisa preservar a posição, o botão pressionado, a soltura e o cancelamento enquanto o cursor passa de um sistema para o outro. A cópia deve começar somente após a soltura em um destino aceito.
+## Integração experimental Windows → Mac
+
+O aplicativo pode ligar a captura da borda do Windows à sessão nativa do Finder. O modo é voltado a desenvolvimento e fica desligado nas sessões normais. Ainda precisa de validação com os dois computadores. O sentido Mac → Windows ainda usa os protótipos separados acima.
+
+Use o ID completo do outro aparelho, disponível nos detalhes do dispositivo. No Mac, compile o auxiliar do Finder e inicie o HeyMouse pelo Terminal. Autorize Acessibilidade para o processo que rodar o auxiliar.
+
+```sh
+mkdir -p .tmp/edge-drag
+xcrun swiftc native/macos/FinderDragProbe.swift -o .tmp/edge-drag/FinderDragProbe
+npm run build
+export HEYMOUSE_EXPERIMENTAL_DRAG_PEER='ID_DO_WINDOWS'
+export HEYMOUSE_EXPERIMENTAL_DRAG_HELPER="$PWD/.tmp/edge-drag/FinderDragProbe"
+npm start
+```
+
+No Windows, feche a instância anterior e inicie depois do Mac:
+
+```powershell
+.\scripts\build-edge-drag-probe.ps1
+npm run build
+$env:HEYMOUSE_EXPERIMENTAL_DRAG_PEER = 'ID_DO_MAC'
+$env:HEYMOUSE_EXPERIMENTAL_DRAG_HELPER = (Resolve-Path .tmp/edge-drag/EdgeDragProbe.exe).Path
+$env:HEYMOUSE_EXPERIMENTAL_DRAG_EDGE = 'left'
+npm start
+```
+
+Disponha uma pasta do Finder aberta antes do teste. A faixa do Windows dura 30 segundos. Use um arquivo de até 8 MB e mantenha o botão pressionado até o auxiliar abrir no Mac. A cópia é preparada temporariamente no Mac para iniciar o arraste. Só o Finder decide a pasta de destino na soltura. Cancelar ou encerrar a sessão remove a cópia temporária. Os binários auxiliares ainda não são distribuídos nos instaladores.

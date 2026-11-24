@@ -8,6 +8,7 @@ import { certificateFingerprint, fingerprint, identityId, loadIdentity, signPayl
 import { Store, validateLayout, validateSettings, type TrustedPeer } from './store';
 import { Discovery, ipv4Interfaces, type DiscoveredDevice } from './discovery';
 import { ControlServer, type FileOffer } from './control';
+import { NativeDrag } from './native-drag';
 import { EngineManager, engineScreenName } from './engine';
 
 app.setName('HeyMouse');
@@ -23,6 +24,7 @@ const discovered = new Map<string, Device>();
 const latency: Record<string, number> = {};
 const notices: string[] = [];
 let transfer: AppState['transfer'];
+let nativeDrag: NativeDrag | undefined;
 let sendingFile = false;
 let pollTimer: ReturnType<typeof setInterval> | undefined, publishTimer: ReturnType<typeof setTimeout> | undefined;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -291,7 +293,11 @@ async function boot() {
     identity, getDevice: localDevice, getDiscovered: () => discovery?.devices() ?? [],
     getPeer: id => store.state.peers.find(p => p.device.id === id), onPair: paired, confirmPair, acceptFile,
     onFileReceived: name => { if (window && !window.isDestroyed()) window.webContents.send('heymouse:file-received', name); },
+    acceptDragFile: (device, file) => nativeDrag?.accept(device, file) ?? Promise.resolve(undefined),
+    onDragFile: (peer, sessionId, path) => nativeDrag?.stage(peer, sessionId, path) ?? Promise.reject(new Error('Arraste nativo indisponível.')),
+    openDrag: (peer, sessionId) => nativeDrag?.open(peer, sessionId),
   });
+  nativeDrag = new NativeDrag(control, app.getPath('userData'), id => store.state.peers.find(p => p.device.id === id), notice);
   try { await control.start(); } catch (error) { notice(`Pareamento indisponível: ${(error as Error).message}`); }
   engineAvailable = (await engine.detect(store.state.settings.engine.executablePath)).available;
   discovery = new Discovery({ getAnnouncement: () => ({ ...localDevice(), publicKey: identity.publicKey, pairingSession: control.pairingSession() }), sign: payload => signPayload(payload, identity.privateKey), verify: verifyPayload });
@@ -300,6 +306,7 @@ async function boot() {
   discovery.on('offline', (id: string) => { const peer = store.state.peers.find(p => p.device.id === id); if (peer && Date.now() - peer.device.lastSeen > 14000) peer.device.online = false; discovered.delete(id); delete latency[id]; publish(); });
   registerIpc(); await createWindow(); createTray();
   if (store.state.settings.discoveryEnabled) await discovery.start().catch(error => notice(error.message));
+  nativeDrag.startSource();
   pollTimer = setInterval(() => { void pollPeers(); }, 5000); void pollPeers();
   if (store.state.settings.engine.autoStart) await startSharing().catch(error => notice(error.message));
 }
@@ -310,6 +317,7 @@ app.on('before-quit', event => {
   if (closing) return; event.preventDefault(); closing = true; sharingWanted = false;
   if (pollTimer) clearInterval(pollTimer); if (reconnectTimer) clearTimeout(reconnectTimer); if (publishTimer) clearTimeout(publishTimer);
   discovery?.stop();
+  nativeDrag?.stop();
   void Promise.allSettled([engine?.stop(), control?.stop(), store?.save()]).finally(() => { tray?.destroy(); tray = null; app.quit(); });
 });
 if (hasLock) app.whenReady().then(boot).catch(error => {

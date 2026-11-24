@@ -12,11 +12,12 @@ import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import path from 'node:path';
 import type { TrustedPeer } from './store';
+import { isDragSessionId, readDragEvents, type DragEvent } from '../native/drag-handoff';
 
 interface PublicIdentity { device: Device; publicKey: string; tlsFingerprint: string }
 interface Envelope { payload: string; signature: string }
 interface Payload extends PublicIdentity { timestamp: number; nonce: string; recipient: string; token?: string; file?: FileOffer }
-export interface FileOffer { name: string; size: number }
+export interface FileOffer { name: string; size: number; dragSession?: string }
 const MAX_FILE_BYTES = 2 * 1024 ** 3;
 interface PairTarget { id: string; publicKey: string; tlsFingerprint: string; addresses: string[]; port: number; token: string }
 interface ControlOptions {
@@ -28,6 +29,9 @@ interface ControlOptions {
   confirmPair: (device: Device, signal: AbortSignal) => Promise<boolean>;
   onFileReceived?: (name: string) => void;
   acceptFile?: (device: Device, file: FileOffer) => Promise<string | undefined>;
+  acceptDragFile?: (device: Device, file: FileOffer) => Promise<string | undefined>;
+  onDragFile?: (peer: TrustedPeer, sessionId: string, destination: string) => Promise<void>;
+  openDrag?: (peer: TrustedPeer, sessionId: string) => ((event: DragEvent) => void) | undefined;
   allowLoopback?: boolean;
 }
 export function isLanAddress(address: string, allowLoopback = false): boolean {
@@ -101,7 +105,8 @@ export async function pinnedRequest(host: string, port: number, pin: string, pat
 }
 
 export class ControlServer {
-  private incomingFile: { token: string; sender: string; path: string; size: number; expires: number } | null = null;
+  private activeDragStream = false;
+  private incomingFile: { token: string; sender: string; path: string; size: number; expires: number; dragSession?: string } | null = null;
   private decidingFile = false;
   private receivingFile = false;
   private server: Server | null = null;
@@ -184,7 +189,7 @@ export class ControlServer {
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const reply = (status: number, body: unknown) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); } };
     try {
-      if (req.method !== 'POST' || !['/pair', '/ping', '/file-offer', '/file'].includes(req.url ?? '')) return reply(404, { error: 'Rota desconhecida.' });
+      if (req.method !== 'POST' || !['/pair', '/ping', '/file-offer', '/file', '/drag-events'].includes(req.url ?? '')) return reply(404, { error: 'Rota desconhecida.' });
       const address = (req.socket.remoteAddress ?? '').replace(/^::ffff:/, '');
       if (!isLanAddress(address, this.options.allowLoopback)) return reply(403, { error: 'Disponível apenas na rede local.' });
       const now = Date.now();
@@ -192,6 +197,10 @@ export class ControlServer {
       const rate = this.attempts.get(address) ?? { count: 0, since: now };
       rate.count++; this.attempts.set(address, rate);
       if (rate.count > 120 || this.attempts.size > 1024) return reply(429, { error: 'Muitas tentativas. Aguarde um minuto.' });
+      if (req.url === '/drag-events') {
+        await this.receiveDragEvents(req);
+        return reply(200, { ok: true });
+      }
       if (req.url === '/file') {
         await this.receiveFile(req);
         return reply(200, { ok: true });
@@ -243,15 +252,17 @@ export class ControlServer {
           if (!file || typeof file.name !== 'string' || !file.name || file.name.length > 255 ||
               /[\\/\x00-\x1f]/.test(file.name) || ['.', '..'].includes(file.name) ||
               !Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_FILE_BYTES) throw new Error('Arquivo inválido ou acima de 2 GB.');
-          if (!this.options.acceptFile) throw new Error('O recebimento está indisponível.');
+          if (file.dragSession !== undefined && !isDragSessionId(file.dragSession)) throw new Error('Sessão inválida.');
+          const accept = file.dragSession ? this.options.acceptDragFile : this.options.acceptFile;
+          if (!accept) throw new Error('O recebimento está indisponível.');
           if (this.decidingFile || this.receivingFile || (this.incomingFile && this.incomingFile.expires > Date.now())) throw new Error('Já existe uma transferência em andamento.');
           this.decidingFile = true;
           req.socket.setTimeout(115_000);
           try {
-            const destination = await this.options.acceptFile(peer.device, file);
+            const destination = await accept(peer.device, file);
             if (!destination || res.destroyed || !this.options.getPeer(peer.device.id)) throw new Error('Transferência recusada ou cancelada.');
             const token = randomBytes(32).toString('hex');
-            this.incomingFile = { token, sender: peer.device.id, size: file.size, path: destination, expires: Date.now() + 60_000 };
+            this.incomingFile = { token, sender: peer.device.id, size: file.size, path: destination, expires: Date.now() + 60_000, dragSession: file.dragSession };
             return reply(200, this.envelope(peer.device.id, payload.nonce, token));
           } finally {
             this.decidingFile = false;
@@ -260,6 +271,70 @@ export class ControlServer {
       }
       reply(200, this.envelope(payload.device.id, payload.nonce));
     } catch (error) { reply(403, { error: error instanceof Error ? error.message : 'Falha na autenticação.' }); }
+  }
+  private async receiveDragEvents(req: IncomingMessage): Promise<void> {
+    const header = req.headers['x-heymouse-drag'];
+    if (typeof header !== 'string' || this.activeDragStream || !this.options.openDrag) throw new Error('Arraste remoto indisponível.');
+    const payload = this.decode(JSON.parse(Buffer.from(header, 'base64url').toString('utf8')));
+    const peer = this.options.getPeer(payload.device.id);
+    const nonceKey = payload.device.id + payload.nonce;
+    const now = Date.now();
+    for (const [nonce, timestamp] of this.seen) if (now - timestamp > 60000) this.seen.delete(nonce);
+    if (!peer || peer.tlsFingerprint !== payload.tlsFingerprint ||
+        fingerprint(peer.publicKey) !== fingerprint(payload.publicKey) ||
+        !isDragSessionId(payload.token) || this.seen.has(nonceKey) || this.seen.size > 4096) {
+      throw new Error('Sessão de arraste não autorizada.');
+    }
+    const receive = this.options.openDrag(peer, payload.token);
+    if (!receive) throw new Error('Sessão de arraste não autorizada.');
+    this.seen.set(nonceKey, now);
+    this.activeDragStream = true;
+    let completed = false;
+    const timer = setTimeout(() => req.destroy(new Error('Sessão expirada.')), 120_000);
+    req.socket.setTimeout(30_000);
+    try {
+      for await (const event of readDragEvents(req.iterator({ destroyOnReturn: false }))) {
+        if (!this.options.getPeer(peer.device.id)) throw new Error('Pareamento removido.');
+        receive(event);
+        if (event.type !== 'file-drag-move') completed = true;
+      }
+    } finally {
+      this.activeDragStream = false;
+      clearTimeout(timer);
+      if (!completed) receive({ type: 'file-drag-cancelled' });
+    }
+  }
+  async forwardDrag(peer: TrustedPeer, sessionId: string, events: AsyncIterable<DragEvent>): Promise<void> {
+    const address = peer.device.addresses.find(ip => isLanAddress(ip, this.options.allowLoopback));
+    if (!address || !isDragSessionId(sessionId)) throw new Error('Destino ou sessão de arraste inválida.');
+    const { id, controlPort } = peer.device;
+    const header = Buffer.from(JSON.stringify(this.envelope(id, randomBytes(16).toString('hex'), sessionId))).toString('base64url');
+    const socket = await pinnedSocket(address, controlPort, peer.tlsFingerprint);
+    const agent = new Agent({ keepAlive: false, maxSockets: 1 });
+    agent.createConnection = () => socket;
+    async function* serialize() {
+      for await (const event of events) {
+        yield JSON.stringify(event) + '\n';
+        if (event.type !== 'file-drag-move') return;
+      }
+    }
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const req = request({ host: address, port: controlPort, path: '/drag-events', method: 'POST', agent,
+          headers: { 'x-heymouse-drag': header, connection: 'close', 'content-type': 'application/x-ndjson' } }, res => {
+          res.resume();
+          res.once('error', reject);
+          res.once('end', () => res.statusCode === 200 ? resolve() : reject(new Error('O destino não aceitou a sessão de arraste.')));
+        });
+        req.setTimeout(30_000, () => req.destroy(new Error('Sessão sem resposta.')));
+        req.once('error', reject);
+        req.flushHeaders();
+        void pipeline(serialize(), req).catch(reject);
+      });
+    } finally {
+      agent.destroy();
+      socket.destroy();
+    }
   }
   private async receiveFile(req: IncomingMessage): Promise<void> {
     const header = req.headers['x-heymouse-transfer'];
@@ -285,7 +360,17 @@ export class ControlServer {
       }), createWriteStream(temp, { flags: 'wx', mode: 0o600 }));
       if (bytes !== file.size) throw new Error('Transferência incompleta.');
       await rename(temp, file.path);
-      this.options.onFileReceived?.(path.basename(file.path));
+      if (file.dragSession) {
+        try {
+          if (!this.options.onDragFile) throw new Error('Arraste indisponível.');
+          await this.options.onDragFile(peer, file.dragSession, file.path);
+        } catch (error) {
+          await unlink(file.path).catch(() => {});
+          throw error;
+        }
+      } else {
+        this.options.onFileReceived?.(path.basename(file.path));
+      }
     } finally {
       this.receivingFile = false;
       await unlink(temp).catch(() => {});
