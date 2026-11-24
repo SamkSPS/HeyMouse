@@ -5,9 +5,10 @@ using System.Runtime.InteropServices;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-// A narrow OLE drop target, visible only while the left button is held.
+// Keep the OLE target hittable during the press, but only highlight a file hover.
 sealed class EdgeFileDrop : Form
 {
+    const double IdleOpacity = 0.01;
     readonly Timer timer = new Timer { Interval = 35 };
     readonly JavaScriptSerializer json = new JavaScriptSerializer();
     readonly string edge;
@@ -22,11 +23,11 @@ sealed class EdgeFileDrop : Form
         ShowInTaskbar = false;
         TopMost = true;
         BackColor = Color.FromArgb(190, 238, 100);
-        Opacity = 0.65;
+        Opacity = IdleOpacity;
         AllowDrop = true;
         DragEnter += Highlight;
         DragOver += Highlight;
-        DragLeave += (_, __) => Opacity = 0.65;
+        DragLeave += (_, __) => Opacity = IdleOpacity;
         DragDrop += Drop;
         timer.Tick += (_, __) => RefreshVisibility();
     }
@@ -57,6 +58,7 @@ sealed class EdgeFileDrop : Form
                     case "top": Bounds = new Rectangle(display.Left, display.Top, display.Width, thickness); break;
                     default: Bounds = new Rectangle(display.Left, display.Bottom - thickness, display.Width, thickness); break;
                 }
+                Opacity = IdleOpacity;
                 Show();
             }
         }
@@ -80,7 +82,7 @@ sealed class EdgeFileDrop : Form
         var files = Files(e);
         bool copy = files != null && files.Length == 1 && (e.AllowedEffect & DragDropEffects.Copy) != 0;
         e.Effect = copy ? DragDropEffects.Copy : DragDropEffects.None;
-        Opacity = copy ? 1 : 0.65;
+        Opacity = copy ? 0.9 : IdleOpacity;
     }
 
     void Drop(object sender, DragEventArgs e)
